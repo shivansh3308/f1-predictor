@@ -278,6 +278,59 @@ def build_feature_table(raw: pd.DataFrame | None = None) -> pd.DataFrame:
     return result
 
 
+def build_model_matrix(
+    df: pd.DataFrame,
+    categories: dict[str, list] | None = None,
+) -> tuple[pd.DataFrame, dict[str, list]]:
+    """Return `(X, categories)` ready to hand to XGBoost.
+
+    Selects exactly `config.FEATURE_COLUMNS` (so column order is identical
+    every time) and casts `config.CATEGORICAL_FEATURES` to pandas
+    ``category`` dtype for XGBoost's native categorical support.
+
+    The `categories` mapping is the critical part for train/predict
+    consistency. At training time, pass ``None`` and the categories are
+    derived from the data and returned, to be persisted alongside the
+    model. At prediction time, pass the persisted mapping back in so that
+    e.g. ``driver_id`` encodes to the same internal code it did during
+    training -- otherwise the model silently reads one driver's history as
+    another's. Values unseen at training time become NaN, which XGBoost
+    handles natively (a debuting driver simply has no learned identity).
+
+    This function is the single place the model matrix is defined; both
+    `src/train.py` and `src/predict.py` must call it rather than
+    assembling columns themselves (spec Section 7).
+    """
+    assert_no_leakage(config.FEATURE_COLUMNS)
+
+    missing = set(config.FEATURE_COLUMNS) - set(df.columns)
+    if missing:
+        raise ValueError(f"Feature table is missing required column(s): {sorted(missing)}")
+
+    X = df[config.FEATURE_COLUMNS].copy()
+
+    resolved: dict[str, list] = {}
+    for col in config.CATEGORICAL_FEATURES:
+        if categories is None:
+            values = sorted(X[col].dropna().unique().tolist())
+        else:
+            values = list(categories[col])
+        X[col] = pd.Categorical(X[col], categories=values)
+        resolved[col] = values
+
+    # Every remaining feature must be numeric for XGBoost. An all-null
+    # column arrives as object dtype rather than float -- which happens for
+    # real at predict time on a single round where nobody has set a Q3 time
+    # yet -- and would otherwise fail deep inside XGBoost's DMatrix
+    # construction. Coerce explicitly so a missing value stays a missing
+    # value (NaN), which XGBoost handles natively.
+    for col in X.columns:
+        if col not in config.CATEGORICAL_FEATURES:
+            X[col] = pd.to_numeric(X[col], errors="coerce")
+
+    return X, resolved
+
+
 def save_feature_table(df: pd.DataFrame, path=config.FEATURE_TABLE_PATH) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(path, index=False)

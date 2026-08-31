@@ -153,3 +153,23 @@ TARGET_COLUMNS: Final[list[str]] = [TARGET_PODIUM, TARGET_POSITION, TARGET_WINNE
 BENCHMARK_PODIUM_CV_AUC: Final[float] = 0.934
 BENCHMARK_PODIUM_CV_LOGLOSS: Final[float] = 0.269
 BENCHMARK_POSITION_CV_MAE: Final[float] = 3.626
+
+# ---------------------------------------------------------------------------
+# Model hyperparameters
+# ---------------------------------------------------------------------------
+
+# Shared across all three models. Deliberately modest depth/learning rate:
+# ~3.4k rows is a small dataset, and the strongest feature (grid) is very
+# predictive on its own, so a deep unregularised model overfits quickly.
+XGB_PARAMS: Final[dict] = {
+    "n_estimators": 400,
+    "max_depth": 4,
+    "learning_rate": 0.05,
+    "subsample": 0.9,
+    "colsample_bytree": 0.9,
+    "min_child_weight": 3,
+    "reg_lambda": 1.0,
+    "random_state": RANDOM_SEED,
+    "enable_categorical": True,
+    "tree_method": "hist",
+}
