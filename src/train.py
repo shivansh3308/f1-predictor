@@ -27,9 +27,9 @@ from typing import Iterator
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.metrics import log_loss, roc_auc_score
+from sklearn.metrics import log_loss, mean_absolute_error, mean_squared_error, roc_auc_score
 from sklearn.model_selection import KFold
-from xgboost import XGBClassifier
+from xgboost import XGBClassifier, XGBRegressor
 
 from src import config, features
 
@@ -126,6 +126,23 @@ def build_podium_model() -> XGBClassifier:
     )
 
 
+def build_position_model() -> XGBRegressor:
+    """Fresh, unfitted finishing-position regressor.
+
+    Uses ``reg:absoluteerror`` rather than the usual squared-error
+    objective because the reported metric is MAE. Squared error chases
+    outliers -- and in F1 the outliers are lap-1 crashes and mechanical
+    DNFs, which are exactly the races no pre-race feature can predict.
+    Optimising the metric we actually report avoids letting those
+    unpredictable blowups drag the whole model around.
+    """
+    return XGBRegressor(
+        objective="reg:absoluteerror",
+        eval_metric="mae",
+        **config.XGB_PARAMS,
+    )
+
+
 def _podium_metrics(y_true: np.ndarray, y_prob: np.ndarray) -> dict[str, float]:
     return {
         "auc": float(roc_auc_score(y_true, y_prob)),
@@ -133,50 +150,105 @@ def _podium_metrics(y_true: np.ndarray, y_prob: np.ndarray) -> dict[str, float]:
     }
 
 
-def cross_validate_podium(
+def _position_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+    return {
+        "mae": float(mean_absolute_error(y_true, y_pred)),
+        "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
+    }
+
+
+def _predict_proba(model, X: pd.DataFrame) -> np.ndarray:
+    return model.predict_proba(X)[:, 1]
+
+
+def _predict_raw(model, X: pd.DataFrame) -> np.ndarray:
+    return model.predict(X)
+
+
+def cross_validate(
     table: pd.DataFrame,
+    *,
+    model_name: str,
+    target: str,
+    model_factory,
+    metric_fn,
+    predict_fn=_predict_proba,
     splitter=season_forward_splits,
     strategy: str = "season-forward (time-respecting)",
 ) -> CVReport:
-    """Cross-validate the podium classifier and return per-fold metrics.
+    """Cross-validate one model and return per-fold metrics.
+
+    Shared by every model so the split, the encoding discipline and the
+    reporting stay identical across them -- the alternative is three
+    near-identical CV loops that drift apart (spec Section 6).
 
     Note the categories are rebuilt from *each fold's training data only*.
     Deriving them once from the full table would let the encoding itself
     carry information about drivers/teams that only appear in the test
     season -- a subtle leak that is easy to miss.
     """
-    report = CVReport(model_name="podium", strategy=strategy)
-    y_all = table[config.TARGET_PODIUM].to_numpy()
+    report = CVReport(model_name=model_name, strategy=strategy)
+    y_all = table[target].to_numpy()
 
     for label, train_idx, test_idx in splitter(table):
-        train_df = table.iloc[train_idx]
-        test_df = table.iloc[test_idx]
+        X_train, categories = features.build_model_matrix(table.iloc[train_idx])
+        X_test, _ = features.build_model_matrix(table.iloc[test_idx], categories=categories)
 
-        X_train, categories = features.build_model_matrix(train_df)
-        X_test, _ = features.build_model_matrix(test_df, categories=categories)
-
-        model = build_podium_model()
+        model = model_factory()
         model.fit(X_train, y_all[train_idx])
-        y_prob = model.predict_proba(X_test)[:, 1]
+        y_pred = predict_fn(model, X_test)
 
         report.folds.append(
             FoldResult(
                 label=label,
                 n_train=len(train_idx),
                 n_test=len(test_idx),
-                metrics=_podium_metrics(y_all[test_idx], y_prob),
+                metrics=metric_fn(y_all[test_idx], y_pred),
             )
         )
 
     return report
 
 
+def cross_validate_podium(table: pd.DataFrame, **kwargs) -> CVReport:
+    return cross_validate(
+        table,
+        model_name="podium",
+        target=config.TARGET_PODIUM,
+        model_factory=build_podium_model,
+        metric_fn=_podium_metrics,
+        predict_fn=_predict_proba,
+        **kwargs,
+    )
+
+
+def cross_validate_position(table: pd.DataFrame, **kwargs) -> CVReport:
+    return cross_validate(
+        table,
+        model_name="position",
+        target=config.TARGET_POSITION,
+        model_factory=build_position_model,
+        metric_fn=_position_metrics,
+        predict_fn=_predict_raw,
+        **kwargs,
+    )
+
+
+def _fit_full(table: pd.DataFrame, target: str, model_factory):
+    X, categories = features.build_model_matrix(table)
+    model = model_factory()
+    model.fit(X, table[target].to_numpy())
+    return model, categories
+
+
 def train_podium_model(table: pd.DataFrame) -> tuple[XGBClassifier, dict[str, list]]:
     """Fit the final podium model on the full table. Returns `(model, categories)`."""
-    X, categories = features.build_model_matrix(table)
-    model = build_podium_model()
-    model.fit(X, table[config.TARGET_PODIUM].to_numpy())
-    return model, categories
+    return _fit_full(table, config.TARGET_PODIUM, build_podium_model)
+
+
+def train_position_model(table: pd.DataFrame) -> tuple[XGBRegressor, dict[str, list]]:
+    """Fit the final position model on the full table. Returns `(model, categories)`."""
+    return _fit_full(table, config.TARGET_POSITION, build_position_model)
 
 
 # ---------------------------------------------------------------------------
@@ -253,9 +325,19 @@ def format_report(report: CVReport, benchmarks: dict[str, float] | None = None) 
 # ---------------------------------------------------------------------------
 
 
+MODELS = ("podium", "position")
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train and cross-validate the podium model")
-    parser.add_argument("--save", action="store_true", help="Fit on all data and write models/podium_xgb.joblib")
+    parser = argparse.ArgumentParser(description="Train and cross-validate the F1 models")
+    parser.add_argument("--save", action="store_true", help="Fit on all data and write models/*.joblib")
+    parser.add_argument(
+        "--models",
+        nargs="+",
+        choices=MODELS,
+        default=list(MODELS),
+        help="Which models to train (default: all implemented)",
+    )
     parser.add_argument(
         "--skip-diagnostic",
         action="store_true",
@@ -267,47 +349,80 @@ def main() -> None:
     table = features.load_feature_table()
     print(f"Loaded feature table: {len(table)} rows, {table['season'].nunique()} seasons\n")
 
-    honest = cross_validate_podium(table)
-    print(
-        format_report(
-            honest,
-            benchmarks={
-                "auc": config.BENCHMARK_PODIUM_CV_AUC,
-                "logloss": config.BENCHMARK_PODIUM_CV_LOGLOSS,
-            },
-        )
-    )
-
-    if not args.skip_diagnostic:
-        leaky = cross_validate_podium(
-            table,
-            splitter=random_kfold_splits,
-            strategy="random K-fold (DIAGNOSTIC ONLY -- leaks future races)",
-        )
-        print()
-        print(format_report(leaky))
-        print()
+    if "podium" in args.models:
+        honest = cross_validate_podium(table)
         print(
-            f"Optimism from ignoring time order: "
-            f"AUC {leaky.mean('auc') - honest.mean('auc'):+.4f}, "
-            f"LogLoss {leaky.mean('logloss') - honest.mean('logloss'):+.4f}"
+            format_report(
+                honest,
+                benchmarks={
+                    "auc": config.BENCHMARK_PODIUM_CV_AUC,
+                    "logloss": config.BENCHMARK_PODIUM_CV_LOGLOSS,
+                },
+            )
         )
 
-    if args.save:
-        model, categories = train_podium_model(table)
-        path = save_model_artifact(
-            model,
-            categories,
-            config.PODIUM_MODEL_PATH,
-            metadata={
-                "cv_strategy": honest.strategy,
-                "cv_auc": honest.mean("auc"),
-                "cv_logloss": honest.mean("logloss"),
-                "n_rows": len(table),
-                "seasons": sorted(table["season"].unique().tolist()),
-            },
-        )
-        print(f"\nSaved podium model -> {path}")
+        if not args.skip_diagnostic:
+            leaky = cross_validate_podium(
+                table,
+                splitter=random_kfold_splits,
+                strategy="random K-fold (DIAGNOSTIC ONLY -- leaks future races)",
+            )
+            print()
+            print(format_report(leaky))
+            print()
+            print(
+                f"Optimism from ignoring time order: "
+                f"AUC {leaky.mean('auc') - honest.mean('auc'):+.4f}, "
+                f"LogLoss {leaky.mean('logloss') - honest.mean('logloss'):+.4f}"
+            )
+
+        if args.save:
+            model, categories = train_podium_model(table)
+            path = save_model_artifact(
+                model,
+                categories,
+                config.PODIUM_MODEL_PATH,
+                metadata={
+                    "cv_strategy": honest.strategy,
+                    "cv_auc": honest.mean("auc"),
+                    "cv_logloss": honest.mean("logloss"),
+                    "n_rows": len(table),
+                    "seasons": sorted(table["season"].unique().tolist()),
+                },
+            )
+            print(f"\nSaved podium model -> {path}")
+
+    if "position" in args.models:
+        print("\n")
+        honest_pos = cross_validate_position(table)
+        print(format_report(honest_pos, benchmarks={"mae": config.BENCHMARK_POSITION_CV_MAE}))
+
+        if not args.skip_diagnostic:
+            leaky_pos = cross_validate_position(
+                table,
+                splitter=random_kfold_splits,
+                strategy="random K-fold (DIAGNOSTIC ONLY -- leaks future races)",
+            )
+            print()
+            print(format_report(leaky_pos))
+            print()
+            print(f"Optimism from ignoring time order: MAE {leaky_pos.mean('mae') - honest_pos.mean('mae'):+.4f}")
+
+        if args.save:
+            model, categories = train_position_model(table)
+            path = save_model_artifact(
+                model,
+                categories,
+                config.POSITION_MODEL_PATH,
+                metadata={
+                    "cv_strategy": honest_pos.strategy,
+                    "cv_mae": honest_pos.mean("mae"),
+                    "cv_rmse": honest_pos.mean("rmse"),
+                    "n_rows": len(table),
+                    "seasons": sorted(table["season"].unique().tolist()),
+                },
+            )
+            print(f"\nSaved position model -> {path}")
 
 
 if __name__ == "__main__":
