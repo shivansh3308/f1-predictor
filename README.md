@@ -132,53 +132,25 @@ python scripts/update_training_data.py
 
 ## Sample output
 
-`python -m app.app any 2021 22` — the 2021 Abu Dhabi title decider:
+### Predicting a race
 
-![Example output](screenshots/example_output.svg)
+`python -m app.app any 2021 22` — the 2021 Abu Dhabi title decider, with Verstappen and Hamilton arriving level on points:
 
-With `--actual`, a fourth column shows the true finishing position and a signed delta against the prediction.
+![Race prediction](screenshots/prediction.png)
 
-<details>
-<summary>Plain-text version</summary>
+### Comparing against the real result
 
-```
-╭──────────────────────────────────────╮
-│ 2021  Round 22  Abu Dhabi Grand Prix │
-╰──────────────────────────────────────╯
+`python -m app.app any 2024 1 --actual` adds the true finishing position and a signed delta, so you can see where the model was right and where it wasn't:
 
-Predicted podium
-    Driver               Team      Grid  Podium prob
-🥇  VER  Max Verstappen  Red Bull    P1        99.0%
-🥈  HAM  Hamilton        Mercedes    P2        94.3%
-🥉  SAI  Sainz           Ferrari     P5        38.1%
+![Prediction vs actual](screenshots/prediction_vs_actual.png)
 
-Win probability (top 3)
-    Driver               Team        Win prob
-1   VER  Max Verstappen  Red Bull       73.3%  ███████████████░░░░░
-2   HAM  Hamilton        Mercedes       24.4%  █████░░░░░░░░░░░░░░░
-3   TSU  Tsunoda         AlphaTauri      0.6%  ░░░░░░░░░░░░░░░░░░░░
+Verstappen called exactly; Perez predicted P5 and finished P2.
 
-Predicted top 10
-Pos  Driver               Team        Grid
-  1  VER  Max Verstappen  Red Bull      P1
-  2  HAM  Hamilton        Mercedes      P2
-  3  PER  Perez           Red Bull      P4
-  4  NOR  Norris          McLaren       P3
-  5  BOT  Bottas          Mercedes      P6
-  6  SAI  Sainz           Ferrari       P5
-  7  LEC  Leclerc         Ferrari       P7
-  8  OCO  Ocon            Alpine        P9
-  9  ALO  Alonso          Alpine       P11
- 10  GAS  Gasly           AlphaTauri   P12
-```
+### Season calendar
 
-</details>
+`python -m app.app calendar --season 2026` — the live schedule, marking which rounds have run:
 
-The image is generated from the real CLI rather than screen-captured, so it stays in sync with the code:
-
-```bash
-python -c "from rich.console import Console; from src import render; c=Console(record=True,width=76,force_terminal=True); render.render_round(2021,22,console=c,top_n=10); c.save_svg('screenshots/example_output.svg',title='f1-predictor')"
-```
+![Season calendar](screenshots/calendar.png)
 
 ---
 
