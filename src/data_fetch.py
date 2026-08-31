@@ -185,19 +185,46 @@ def _timedelta_to_seconds(value: pd.Timedelta) -> float | None:
     return value.total_seconds()
 
 
+class _IncompleteSessionError(RuntimeError):
+    """Raised when a session `.load()` call succeeds but the results are unusable.
+
+    Seen in practice: under load, FastF1 can silently fall back to a
+    "livetiming mirror" that has the driver roster but none of the actual
+    session results (grid, classified position, ...). No exception is
+    raised in that case, so without this check the empty/garbage row would
+    get persisted as if it were real data.
+    """
+
+
+def _validate_race_results(results: pd.DataFrame, season: int, round_number: int) -> None:
+    if results.empty:
+        raise _IncompleteSessionError(f"{season} round {round_number}: race results are empty")
+    # DriverId and GridPosition are populated for every legitimately loaded
+    # race, even one with a DNS/withdrawal (that shows up as one null, not
+    # all of them). All-null here means the session "loaded" but is hollow.
+    if results["DriverId"].eq("").all() or results["GridPosition"].isna().all():
+        raise _IncompleteSessionError(
+            f"{season} round {round_number}: race session loaded but results look empty "
+            "(DriverId/GridPosition all missing) -- likely a partial data source fallback"
+        )
+
+
 def fetch_round_raw(season: int, round_number: int) -> pd.DataFrame | None:
     """Fetch and combine Race + Qualifying results for one round.
 
     Returns ``None`` (and logs a warning) if either session can't be loaded
     at all, e.g. the round was cancelled or FastF1 has no data for it. This
     is the "missing sessions" half of the graceful-handling requirement; the
-    "rate limits" half is `_with_retries` around each load.
+    "rate limits" half is `_with_retries` around each load. Also returns
+    ``None`` if the race session loads "successfully" but the results are
+    hollow (see `_validate_race_results`) -- treated the same as unavailable.
     """
     _ensure_cache_enabled()
 
     try:
         race = _with_retries(fastf1.get_session, season, round_number, "R")
         _with_retries(race.load, laps=False, telemetry=False, weather=False, messages=False)
+        _validate_race_results(race.results, season, round_number)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Skipping %d round %d: race session unavailable (%s)", season, round_number, exc)
         return None
