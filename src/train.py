@@ -428,7 +428,9 @@ def format_report(report: CVReport, benchmarks: dict[str, float] | None = None) 
 MODELS = ("podium", "position", "winner")
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    """Entrypoint. `argv` is explicit so other scripts can invoke training
+    without this re-parsing *their* command line."""
     parser = argparse.ArgumentParser(description="Train and cross-validate the F1 models")
     parser.add_argument("--save", action="store_true", help="Fit on all data and write models/*.joblib")
     parser.add_argument(
@@ -443,7 +445,7 @@ def main() -> None:
         action="store_true",
         help="Skip the random K-fold comparison run",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     table = features.load_feature_table()

@@ -186,6 +186,76 @@ def test_summarize_reports_each_season_plus_overall():
     assert summary[summary["season"] == "ALL"]["podium_rate"].iloc[0] == pytest.approx(6 / 9)
 
 
+# ---------------------------------------------------------------------------
+# Winner calibration (scripts/eval_winners.py)
+# ---------------------------------------------------------------------------
+
+
+def make_calibration_frame(prob: list[float], won: list[int]) -> pd.DataFrame:
+    from src import config
+
+    return pd.DataFrame({"prob_win": prob, config.TARGET_WINNER: won})
+
+
+def test_perfectly_calibrated_predictions_score_zero_error():
+    from scripts import eval_winners
+
+    # In the 0.4-0.6 band: 10 predictions at 0.5, exactly 5 of which win.
+    frame = make_calibration_frame([0.5] * 10, [1] * 5 + [0] * 5)
+    table = eval_winners.reliability_table(frame)
+    assert eval_winners.expected_calibration_error(table) == pytest.approx(0.0)
+
+
+def test_overconfident_predictions_show_a_negative_gap():
+    from scripts import eval_winners
+
+    # Model says 90%, only 3 of 10 actually win.
+    frame = make_calibration_frame([0.9] * 10, [1] * 3 + [0] * 7)
+    table = eval_winners.reliability_table(frame)
+    assert table["gap"].iloc[0] < 0, "over-confidence should read as a negative gap"
+    assert eval_winners.expected_calibration_error(table) == pytest.approx(0.6)
+
+
+def test_underconfident_predictions_show_a_positive_gap():
+    from scripts import eval_winners
+
+    frame = make_calibration_frame([0.1] * 10, [1] * 5 + [0] * 5)
+    table = eval_winners.reliability_table(frame)
+    assert table["gap"].iloc[0] > 0
+
+
+def test_reliability_table_counts_rows_and_wins_per_band():
+    from scripts import eval_winners
+
+    frame = make_calibration_frame([0.005] * 4 + [0.9] * 2, [0, 0, 0, 0, 1, 1])
+    table = eval_winners.reliability_table(frame)
+    assert table["n"].sum() == 6
+    assert table["wins"].sum() == 2
+
+
+def test_actionable_calibration_ignores_the_near_zero_band():
+    """The overall ECE is dominated by no-hope drivers; this must not be."""
+    from scripts import eval_winners
+
+    # 1000 correctly-near-zero rows, plus 10 badly over-confident ones.
+    frame = make_calibration_frame([0.001] * 1000 + [0.9] * 10, [0] * 1000 + [1] * 3 + [0] * 7)
+    table = eval_winners.reliability_table(frame)
+
+    overall = eval_winners.expected_calibration_error(table)
+    top, n = eval_winners.actionable_calibration(table)
+
+    assert n == 10
+    assert top > overall * 10, "restricting to confident predictions should expose the error the aggregate hides"
+
+
+def test_brier_score_rewards_confident_correct_predictions():
+    from scripts import eval_winners
+
+    confident = make_calibration_frame([0.95, 0.05], [1, 0])
+    hedged = make_calibration_frame([0.55, 0.45], [1, 0])
+    assert eval_winners.brier_score(confident) < eval_winners.brier_score(hedged)
+
+
 def test_summary_renders_both_model_and_baseline():
     results = pd.DataFrame(
         {

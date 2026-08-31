@@ -111,13 +111,28 @@ def backtest(
     table: pd.DataFrame | None = None,
     n_splits: int = config.N_CV_SPLITS,
 ) -> pd.DataFrame:
-    """Walk-forward backtest. Returns one row per race.
+    """Walk-forward backtest. Returns one row per race."""
+    predictions = walk_forward_predictions(table, n_splits=n_splits)
+    outcomes = [_score_race(race) for _, race in predictions.groupby(["season", "round"])]
+    return pd.DataFrame([vars(o) for o in outcomes])
+
+
+def walk_forward_predictions(
+    table: pd.DataFrame | None = None,
+    n_splits: int = config.N_CV_SPLITS,
+) -> pd.DataFrame:
+    """Out-of-sample predictions for every driver-race, one row per driver.
 
     For each test season, three fresh models are trained on the seasons
-    before it, then used to predict every race of that season.
+    strictly before it, then used to predict that whole season. No row is
+    ever predicted by a model that saw it.
+
+    Shared by `backtest` (which scores races) and by
+    ``scripts/eval_winners.py`` (which measures calibration), so both
+    report on exactly the same out-of-sample predictions.
     """
     table = features.load_feature_table() if table is None else table
-    outcomes: list[RaceOutcome] = []
+    predicted: list[pd.DataFrame] = []
 
     for label, train_idx, test_idx in train.season_forward_splits(table, n_splits=n_splits):
         train_df = table.iloc[train_idx]
@@ -136,11 +151,9 @@ def backtest(
         test_df["prob_win"] = train.normalize_win_probabilities(
             test_df, winner_model.predict_proba(X_test)[:, 1]
         )
+        predicted.append(test_df)
 
-        for _, race in test_df.groupby(["season", "round"]):
-            outcomes.append(_score_race(race))
-
-    return pd.DataFrame([vars(o) for o in outcomes])
+    return pd.concat(predicted, ignore_index=True)
 
 
 def summarize(results: pd.DataFrame) -> pd.DataFrame:
