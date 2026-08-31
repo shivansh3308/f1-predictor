@@ -1,0 +1,236 @@
+"""Feature engineering — single source of truth.
+
+Turns the raw per-driver-race pulls from ``src/data_fetch.py`` into the
+model-ready feature table. Both training (``src/train.py``) and prediction
+(``src/predict.py``) must call `build_feature_table` / `build_features_for_row`
+from here rather than recomputing anything themselves, or the two will
+silently drift (spec Section 7, "Style").
+
+**Leakage discipline** (spec Section 4 / Section 7): every engineered
+feature must be computable from information available strictly *before* the
+race in question. Concretely:
+
+- Rolling averages, standings, and DNF rates use a backward shift — a row's
+  features are built from that driver/constructor's races *before* this
+  round, never including this round's own result.
+- `assert_no_leakage` is a hard runtime check (not just a comment) that
+  raises immediately if a post-race-only column (see
+  `config.POST_RACE_ONLY_COLUMNS`) ever ends up in the model feature set.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Iterable
+
+import pandas as pd
+
+from src import config, data_fetch
+
+logger = logging.getLogger(__name__)
+
+# Status strings that count as a classified finish (not a DNF) for the
+# reliability-rate features. Determined empirically from the fetched data
+# (see FastF1's `Status` values): a clean finish, or finishing N laps down
+# but still classified, are not reliability failures. Everything else
+# (Retired, Accident, Engine, Disqualified, Did not start, Withdrew, ...)
+# counts as a DNF.
+_CLASSIFIED_FINISH_STATUSES = {"Finished", "Lapped"}
+
+
+class LeakageError(RuntimeError):
+    """A post-race-only column was found in the model feature set."""
+
+
+def assert_no_leakage(feature_columns: Iterable[str]) -> None:
+    """Raise immediately if any post-race-only column is in `feature_columns`.
+
+    Call this on the *actual* columns being handed to a model — in
+    `build_feature_table` before it returns, and again defensively in
+    `train.py`/`predict.py` right before `.fit()`/`.predict()`. Cheap, and
+    exactly the kind of mistake that's invisible until the metrics look
+    suspiciously good.
+    """
+    leaked = set(feature_columns) & set(config.POST_RACE_ONLY_COLUMNS)
+    if leaked:
+        raise LeakageError(
+            f"Post-race-only column(s) {sorted(leaked)} found in the model feature set. "
+            "These are only known after the race and must never be used as predictive "
+            "features -- this is the exact mistake that produces a fake-good AUC."
+        )
+
+
+def _is_dnf(status: pd.Series) -> pd.Series:
+    """True where `status` represents a DNF/reliability failure, not a finish."""
+    is_classified = status.eq("Finished") | status.str.startswith("+", na=False) | status.eq("Lapped")
+    return ~is_classified
+
+
+def _add_rolling_form_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Driver/constructor rolling-average finish position, backward-looking only.
+
+    For each driver (constructor), row *i*'s value is the mean finish
+    position over up to `config.ROLLING_WINDOW` races strictly before row
+    *i* -- computed as `shift(1)` (drop the current race) then a rolling
+    mean, within each driver/constructor group sorted chronologically. A
+    driver/constructor's first appearance in the dataset has no prior races,
+    so the value is NaN (honest "no history yet" signal; XGBoost handles
+    NaN natively) rather than something that fakes a value.
+    """
+    df = df.sort_values(["season", "round"], kind="stable")
+
+    df["driver_rolling_avg_finish"] = df.groupby("driver_id")["finish_position"].transform(
+        lambda s: s.shift(1).rolling(window=config.ROLLING_WINDOW, min_periods=1).mean()
+    )
+
+    df["constructor_rolling_avg_finish"] = df.groupby("constructor_id")["finish_position"].transform(
+        lambda s: s.shift(1).rolling(window=config.ROLLING_WINDOW, min_periods=1).mean()
+    )
+
+    return df
+
+
+def _add_dnf_rate_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Driver/constructor DNF rate, backward-looking only (same shift discipline as rolling form)."""
+    df = df.sort_values(["season", "round"], kind="stable")
+    df["_is_dnf"] = _is_dnf(df["status"])
+
+    df["driver_dnf_rate"] = df.groupby("driver_id")["_is_dnf"].transform(
+        lambda s: s.shift(1).expanding(min_periods=1).mean()
+    )
+    df["constructor_dnf_rate"] = df.groupby("constructor_id")["_is_dnf"].transform(
+        lambda s: s.shift(1).expanding(min_periods=1).mean()
+    )
+
+    return df.drop(columns=["_is_dnf"])
+
+
+def _add_standings_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Championship points/standing *entering* this race (i.e. through the previous round).
+
+    Championships reset every season, so all of this groups by `season` in
+    addition to driver/constructor. `points_before_race` = cumulative sum of
+    points from strictly earlier rounds this season (`cumsum() - own points`
+    is the backward-shift-free way to write that, since the group is already
+    sorted chronologically). `standing_before_race` = rank of that value
+    among all drivers/constructors active in the same (season, round)
+    snapshot -- rank 1 is the championship leader at that point in time.
+    """
+    df = df.sort_values(["season", "round"], kind="stable")
+
+    # Sprint weekends (2021+) award points in a separate session on top of
+    # the Race -- `points` alone would undercount a driver's real
+    # championship total there. `total_points` is what actually accumulates
+    # in the standings; the split race/sprint columns are kept around only
+    # as raw inputs.
+    df["total_points"] = df["points"] + df["sprint_points"].fillna(0.0)
+
+    df["driver_points_before_race"] = df.groupby(["season", "driver_id"])["total_points"].transform(
+        lambda s: s.cumsum() - s
+    )
+    df["driver_standing_before_race"] = df.groupby(["season", "round"])["driver_points_before_race"].rank(
+        method="min", ascending=False
+    )
+
+    # Constructor points are the sum of both cars' points in a round. Build
+    # a small per-(season, round, constructor) summary, compute the
+    # before-this-round cumulative total there, then merge it back onto
+    # every driver row for that constructor/round.
+    constructor_round = (
+        df.groupby(["season", "round", "constructor_id"], as_index=False)["total_points"].sum().rename(
+            columns={"total_points": "constructor_round_points"}
+        )
+    )
+    constructor_round = constructor_round.sort_values(["season", "round"], kind="stable")
+    constructor_round["constructor_points_before_race"] = constructor_round.groupby(
+        ["season", "constructor_id"]
+    )["constructor_round_points"].transform(lambda s: s.cumsum() - s)
+    constructor_round["constructor_standing_before_race"] = constructor_round.groupby(["season", "round"])[
+        "constructor_points_before_race"
+    ].rank(method="min", ascending=False)
+
+    df = df.merge(
+        constructor_round[
+            ["season", "round", "constructor_id", "constructor_points_before_race", "constructor_standing_before_race"]
+        ],
+        on=["season", "round", "constructor_id"],
+        how="left",
+    )
+
+    return df
+
+
+def _add_targets(df: pd.DataFrame) -> pd.DataFrame:
+    df[config.TARGET_POSITION] = df["finish_position"]
+    df[config.TARGET_PODIUM] = (df["finish_position"] <= 3).astype(int)
+    df[config.TARGET_WINNER] = (df["finish_position"] == 1).astype(int)
+    return df
+
+
+def build_feature_table(raw: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Build the full model-ready feature table from raw per-round pulls.
+
+    Parameters
+    ----------
+    raw:
+        Raw driver-race rows as produced by `data_fetch.load_all_raw()`. If
+        not given, loads all cached seasons from `config.DATA_RAW_DIR`.
+
+    Returns
+    -------
+    One row per driver-race, containing identity columns, every column in
+    `config.FEATURE_COLUMNS`, and every column in `config.TARGET_COLUMNS`.
+    Rows with no valid target (driver withdrew/DNS before the race, so there
+    is no finishing position to predict) are dropped.
+    """
+    if raw is None:
+        raw = data_fetch.load_all_raw()
+    if raw.empty:
+        raise ValueError("No raw data found -- run data_fetch first (see src/data_fetch.py).")
+
+    df = raw.copy()
+
+    before = len(df)
+    df = df[df["finish_position"].notna()].copy()
+    dropped = before - len(df)
+    if dropped:
+        logger.info(
+            "Dropped %d row(s) with no finish_position (withdrew/DNS before the race, no valid target)",
+            dropped,
+        )
+
+    df = df.rename(columns={"circuit": "circuit_id"})
+
+    df = _add_rolling_form_features(df)
+    df = _add_dnf_rate_features(df)
+    df = _add_standings_features(df)
+    df = _add_targets(df)
+
+    identity_columns = ["season", "round", "event_name", "driver_id", "driver_abbreviation", "constructor_id"]
+    output_columns = identity_columns + config.FEATURE_COLUMNS + config.TARGET_COLUMNS
+    # `season` and `constructor_id`/`driver_id` are both identity and feature
+    # columns -- keep a single copy each, in the declared order.
+    seen: set[str] = set()
+    ordered_columns = [c for c in output_columns if not (c in seen or seen.add(c))]
+
+    result = df[ordered_columns].sort_values(["season", "round", "driver_id"], kind="stable").reset_index(drop=True)
+
+    assert_no_leakage(config.FEATURE_COLUMNS)
+
+    return result
+
+
+def save_feature_table(df: pd.DataFrame, path=config.FEATURE_TABLE_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(path, index=False)
+
+
+def load_feature_table(path=config.FEATURE_TABLE_PATH) -> pd.DataFrame:
+    return pd.read_parquet(path)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    table = build_feature_table()
+    save_feature_table(table)
+    print(f"Built feature table: {table.shape[0]} rows, {table.shape[1]} columns -> {config.FEATURE_TABLE_PATH}")

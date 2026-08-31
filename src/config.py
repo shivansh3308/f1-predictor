@@ -70,6 +70,10 @@ RANDOM_SEED: Final[int] = 42
 # predictions — use a time-series split or hold out full seasons instead).
 N_CV_SPLITS: Final[int] = 5
 
+# Window size (in races) for driver/constructor rolling-average-finish
+# features. Computed with a strict backward shift — see src/features.py.
+ROLLING_WINDOW: Final[int] = 5
+
 # ---------------------------------------------------------------------------
 # Feature set (spec Section 4)
 # ---------------------------------------------------------------------------
@@ -114,15 +118,20 @@ CATEGORICAL_FEATURES: Final[list[str]] = [
 
 # Columns that must never appear in FEATURE_COLUMNS: they are only knowable
 # after the race and would leak the target. Enforced by an assertion in
-# src/features.py, not just documented here.
+# src/features.py, not just documented here. Includes both the raw
+# data_fetch.py column names (status, laps, points, classified_position) and
+# the engineered target names, so the check catches leakage at either stage.
 POST_RACE_ONLY_COLUMNS: Final[list[str]] = [
     "finish_position",
+    "classified_position",
     "podium_finish",
     "is_winner",
     "race_time",
     "fastest_lap_time",
     "points",
+    "sprint_points",
     "status",
+    "laps",
     "laps_completed",
 ]
 

@@ -62,6 +62,9 @@ _RACE_COLUMNS = [
     "Laps",
 ]
 
+# Columns pulled from a Sprint session.load() result (sprint weekends only).
+_SPRINT_COLUMNS = ["DriverId", "Points"]
+
 
 # ---------------------------------------------------------------------------
 # Cache
@@ -209,6 +212,35 @@ def _validate_race_results(results: pd.DataFrame, season: int, round_number: int
         )
 
 
+def _fetch_sprint_points(season: int, round_number: int, event_format: str) -> pd.DataFrame:
+    """Return {driver_id, sprint_points} for a sprint weekend.
+
+    Since 2021, sprint weekends award their own points on top of the main
+    Race, and FastF1 keeps that in a separate 'S' session -- the Race
+    session's Points column does NOT include it. Skipped entirely (no
+    request made) for non-sprint weekends, both to avoid wasting API calls
+    on the ~80% of rounds that aren't sprints and because a "sprint session
+    unavailable" warning would be noise there.
+    """
+    if "sprint" not in (event_format or "").lower():
+        return pd.DataFrame(columns=["driver_id", "sprint_points"])
+
+    try:
+        sprint = _with_retries(fastf1.get_session, season, round_number, "S")
+        _with_retries(sprint.load, laps=False, telemetry=False, weather=False, messages=False)
+        sprint_results = sprint.results[_SPRINT_COLUMNS].copy()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "%d round %d: sprint session unavailable, treating sprint points as 0 (%s)",
+            season,
+            round_number,
+            exc,
+        )
+        return pd.DataFrame(columns=["driver_id", "sprint_points"])
+
+    return sprint_results.rename(columns={"DriverId": "driver_id", "Points": "sprint_points"})
+
+
 def fetch_round_raw(season: int, round_number: int) -> pd.DataFrame | None:
     """Fetch and combine Race + Qualifying results for one round.
 
@@ -270,6 +302,10 @@ def fetch_round_raw(season: int, round_number: int) -> pd.DataFrame | None:
     )
 
     event = race.event
+    sprint_points = _fetch_sprint_points(season, round_number, str(event.get("EventFormat", "")))
+    merged = merged.merge(sprint_points, on="driver_id", how="left")
+    merged["sprint_points"] = merged["sprint_points"].fillna(0.0)
+
     merged.insert(0, "season", season)
     merged.insert(1, "round", round_number)
     merged.insert(2, "event_name", str(event.get("EventName", "")))
