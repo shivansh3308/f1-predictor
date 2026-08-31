@@ -313,6 +313,23 @@ def test_winner_training_is_deterministic():
     assert np.allclose(m1.predict_proba(X1)[:, 1], m2.predict_proba(X2)[:, 1])
 
 
+def test_model_paths_are_distinct():
+    """Two models writing to one path would silently overwrite each other."""
+    paths = [config.PODIUM_MODEL_PATH, config.POSITION_MODEL_PATH, config.WINNER_MODEL_PATH]
+    assert len(set(paths)) == len(paths)
+
+
+def test_model_paths_match_spec_filenames():
+    """Spec Section 3 names these files explicitly; downstream code expects them."""
+    assert config.PODIUM_MODEL_PATH.name == "podium_xgb.joblib"
+    assert config.POSITION_MODEL_PATH.name == "position_xgb.joblib"
+    assert config.WINNER_MODEL_PATH.name == "winner_xgb.joblib"
+
+
+def test_all_three_models_are_wired_into_the_cli():
+    assert set(train.MODELS) == {"podium", "position", "winner"}
+
+
 def test_save_and_load_model_artifact_round_trip(tmp_path):
     table = make_table()
     model, categories = train.train_podium_model(table)
