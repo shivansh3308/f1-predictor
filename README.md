@@ -169,6 +169,54 @@ Output is colourised in a real terminal. With `--actual`, a fourth column shows 
 
 ---
 
+## Limitations
+
+### What the model cannot see
+
+Every feature is fixed before lights out. Everything that decides a Grand Prix after that is invisible to it: **safety cars and red flags**, **weather changes mid-race**, **first-lap collisions**, **pit strategy and undercuts**, **tyre degradation**, **mechanical failures**, and **team orders**.
+
+This is measurable, not hypothetical. Splitting the backtest by whether a driver actually finished:
+
+| | Mean position error | n |
+|---|---|---|
+| Finished | **2.90** | 1,965 |
+| Did not finish | **7.12** | 310 |
+
+DNFs are 13.6% of driver-races and carry 2.5× the error. Excluding them, MAE falls from 3.48 to 2.90 — so roughly a sixth of the model's total error comes from outcomes no pre-race feature could have predicted. A retirement on lap 3 is not a modelling failure; it is a car breaking.
+
+Error also rises steadily down the field, which is where chaos concentrates:
+
+| Actual finish | Mean position error | n |
+|---|---|---|
+| 1–3 | 1.85 | 342 |
+| 4–10 | 3.16 | 798 |
+| 11–20 | 4.19 | 1,135 |
+
+### Where it is systematically wrong
+
+**It does not beat predicting the grid order.** Stated again here because it is the single most important caveat: across 114 real races the model is worse than assuming everyone finishes where they qualified, on winner accuracy, podium hit rate, and position error alike.
+
+**It over-anchors on driver and constructor identity.** The clearest failure in the dataset: in 2024 it predicted Verstappen as winner in **13 races he did not win**. It had learned 2023's order — where he won 19 of 22 — and carried that prior into a season where McLaren became the quicker car. The model adapts to a shifting competitive order roughly a season late.
+
+**It is over-confident exactly where confidence matters.** At a stated 80–100% win probability, the driver wins 58.8% of the time. Treat high probabilities as strong preferences, not as odds.
+
+**It is weakest in transition years and strongest in dominant ones.** It beat the baseline decisively in 2023 and lost in every other backtested season. A model that only outperforms when one driver is winning most races is not adding much: that is the season you least need a model for.
+
+**Upsets are invisible to it by construction.** In 14% of races the winner started outside the top three — the races most worth predicting are the ones where pre-race form is least informative.
+
+**Regulation changes break the learned order.** 2022's ground-effect rules reset the competitive picture, and the model has no feature representing "the cars are different now". `season` is included, but it cannot anticipate a regime shift it has not yet seen.
+
+**New drivers have no history.** A debut driver's rolling-form, DNF-rate and standings features are null, and their identity is an unseen category. XGBoost handles this natively rather than guessing, but such a driver is predicted almost purely from grid position.
+
+### Scope
+
+- **Training data is 2018–2025.** The live 2026 season is deliberately excluded — training on a part-run season would skew rolling-form and standings features. `python -m app.app upcoming` reads the live calendar independently, so it works once a round's qualifying data is fetched.
+- **Predicting a race inside the training range is in-sample** and will look better than the model's true skill. `scripts/eval_past.py` is the honest measurement.
+- **Requires qualifying to have run.** A race has no grid until then, which in practice means predictions are only possible from the day before.
+- **Sprint points are included** in championship standings, but sprint results themselves are not used as a form signal.
+
+---
+
 ## How it works
 
 **Features** (`src/features.py`) — one row per driver-race, every value computable strictly before the race starts: grid, qualifying position, Q1/Q2/Q3 times, rolling driver and constructor form, championship points and standing entering the round, DNF rates, circuit, and season.
