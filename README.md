@@ -134,6 +134,13 @@ python scripts/update_training_data.py
 
 `python -m app.app any 2021 22` — the 2021 Abu Dhabi title decider:
 
+![Example output](screenshots/example_output.svg)
+
+With `--actual`, a fourth column shows the true finishing position and a signed delta against the prediction.
+
+<details>
+<summary>Plain-text version</summary>
+
 ```
 ╭──────────────────────────────────────╮
 │ 2021  Round 22  Abu Dhabi Grand Prix │
@@ -165,7 +172,13 @@ Pos  Driver               Team        Grid
  10  GAS  Gasly           AlphaTauri   P12
 ```
 
-Output is colourised in a real terminal. With `--actual`, a fourth column shows the true finishing position and a signed delta.
+</details>
+
+The image is generated from the real CLI rather than screen-captured, so it stays in sync with the code:
+
+```bash
+python -c "from rich.console import Console; from src import render; c=Console(record=True,width=76,force_terminal=True); render.render_round(2021,22,console=c,top_n=10); c.save_svg('screenshots/example_output.svg',title='f1-predictor')"
+```
 
 ---
 
