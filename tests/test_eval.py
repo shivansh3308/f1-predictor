@@ -187,6 +187,91 @@ def test_summarize_reports_each_season_plus_overall():
 
 
 # ---------------------------------------------------------------------------
+# Holdout evaluation (scripts/eval_holdout.py)
+# ---------------------------------------------------------------------------
+
+
+def _fake_models(drivers: list[str], constructors: list[str]):
+    from src import predict as predict_module
+
+    categories = {"driver_id": drivers, "constructor_id": constructors, "circuit_id": ["c"]}
+    artifact = {"model": None, "categories": categories}
+    return predict_module.LoadedModels(podium=artifact, position=artifact, winner=artifact)
+
+
+def test_unseen_categories_flags_new_drivers_and_teams():
+    """A season with new entrants is harder for reasons unrelated to racing."""
+    from scripts import eval_holdout
+
+    rows = pd.DataFrame(
+        {
+            "driver_id": ["known_a", "rookie", "known_b"],
+            "constructor_id": ["old_team", "new_team", "old_team"],
+        }
+    )
+    models = _fake_models(["known_a", "known_b"], ["old_team"])
+    unseen = eval_holdout.unseen_categories(rows, models)
+
+    assert unseen["driver_id"] == ["rookie"]
+    assert unseen["constructor_id"] == ["new_team"]
+
+
+def test_unseen_categories_empty_when_everything_is_known():
+    from scripts import eval_holdout
+
+    rows = pd.DataFrame({"driver_id": ["a"], "constructor_id": ["t"]})
+    unseen = eval_holdout.unseen_categories(rows, _fake_models(["a", "b"], ["t"]))
+    assert unseen == {"driver_id": [], "constructor_id": []}
+
+
+def _holdout_results(n_races: int = 12, model_wins: int = 8, base_wins: int = 9) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "season": [2026] * n_races,
+            "round_number": list(range(1, n_races + 1)),
+            "event_name": [f"GP {i}" for i in range(1, n_races + 1)],
+            "n_drivers": [22] * n_races,
+            "predicted_winner": ["a"] * n_races,
+            "actual_winner": ["a"] * n_races,
+            "winner_correct": [True] * model_wins + [False] * (n_races - model_wins),
+            "baseline_winner_correct": [True] * base_wins + [False] * (n_races - base_wins),
+            "podium_hits": [2] * n_races,
+            "baseline_podium_hits": [2] * n_races,
+            "position_mae": [4.0] * n_races,
+            "baseline_position_mae": [3.5] * n_races,
+        }
+    )
+
+
+def test_holdout_report_states_the_race_count_caveat():
+    """A 12-race sample cannot support a winner-accuracy conclusion; say so."""
+    from scripts import eval_holdout
+
+    text = eval_holdout.format_report(2026, _holdout_results(), {"driver_id": [], "constructor_id": []})
+    assert "dominated by noise" in text
+    assert "8/12 vs 9/12" in text
+    assert "difference of 1 race" in text
+
+
+def test_holdout_report_points_at_the_more_reliable_metric():
+    from scripts import eval_holdout
+
+    text = eval_holdout.format_report(2026, _holdout_results(), {"driver_id": [], "constructor_id": []})
+    assert "264 driver-races" in text, "should scale by drivers, not races"
+    assert "more reliable signal" in text
+
+
+def test_holdout_report_lists_unseen_entrants_when_present():
+    from scripts import eval_holdout
+
+    text = eval_holdout.format_report(
+        2026, _holdout_results(), {"driver_id": ["rookie"], "constructor_id": ["audi"]}
+    )
+    assert "rookie" in text and "audi" in text
+    assert "not guessed" in text
+
+
+# ---------------------------------------------------------------------------
 # Winner calibration (scripts/eval_winners.py)
 # ---------------------------------------------------------------------------
 

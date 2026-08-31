@@ -436,9 +436,27 @@ def load_raw_season(season: int) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+def available_seasons() -> list[int]:
+    """Seasons that actually have data on disk, whatever the training range."""
+    if not config.DATA_RAW_DIR.exists():
+        return []
+    return sorted(
+        int(p.name)
+        for p in config.DATA_RAW_DIR.iterdir()
+        if p.is_dir() and p.name.isdigit() and any(p.glob("*.parquet"))
+    )
+
+
 def load_all_raw(seasons: list[int] | None = None) -> pd.DataFrame:
-    """Load and concatenate every cached round parquet across seasons."""
-    seasons = seasons if seasons is not None else config.SEASONS
+    """Load and concatenate every cached round parquet across seasons.
+
+    Defaults to every season present on disk, NOT `config.SEASONS`. The
+    feature table is "all the data we have"; restricting to the training
+    range is `src/train.py`'s job. Keeping those separate is what lets a
+    held-out season (2026) be featurised and predicted without being
+    trained on.
+    """
+    seasons = seasons if seasons is not None else available_seasons()
     frames = [load_raw_season(season) for season in seasons]
     frames = [f for f in frames if not f.empty]
     if not frames:

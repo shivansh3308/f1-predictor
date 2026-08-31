@@ -448,7 +448,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    table = features.load_feature_table()
+    table = features.load_training_table()
     print(f"Loaded feature table: {len(table)} rows, {table['season'].nunique()} seasons\n")
 
     if "podium" in args.models:

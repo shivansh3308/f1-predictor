@@ -2,7 +2,7 @@
 
 Predicts Formula 1 race outcomes from information available **before lights out** — qualifying, grid, and rolling driver/constructor form. Three XGBoost models: podium finish, finishing position, and race winner.
 
-Built on [FastF1](https://docs.fastf1.dev/). 2018–2025, 173 races, 3,455 driver-race rows. No paid APIs.
+Built on [FastF1](https://docs.fastf1.dev/). Trained on 2018–2025 — 173 races, 3,455 driver-race rows — and evaluated on the in-progress 2026 season as a true holdout. No paid APIs.
 
 ---
 
@@ -51,6 +51,31 @@ The per-season split shows why:
 | 2025 | 62.5% | 66.7% | |
 
 The model wins big in 2023, a season one driver dominated, and loses whenever the competitive order shifted. In 2024 it predicted Verstappen **13 times in races someone else won** — it had learned 2023's pecking order from driver and constructor identity and carried that stale prior into McLaren's rise.
+
+### 2026 holdout — a season the models have genuinely never seen
+
+The backtest above reconstructs out-of-sample performance by retraining. This is stronger: the models serialized in `models/` were fit on 2018–2025 and saved *before* any 2026 race existed. Scoring the 12 completed 2026 rounds with them, unmodified, is the real use case — and 2026 brought a major regulation change, new power units, and two new constructors.
+
+| Metric | Model | Grid baseline | Gap |
+|---|---|---|---|
+| Winner accuracy | 66.7% | 75.0% | −8.3% |
+| Podium hit rate | **63.9%** | 61.1% | **+2.8%** |
+| Position MAE | 4.25 | 3.47 | +0.78 |
+
+**The useful comparison is against the earlier backtest, because the baseline acts as a control:**
+
+| | 2021–2025 | 2026 | Change |
+|---|---|---|---|
+| Grid baseline MAE | 3.42 | 3.47 | +0.05 — flat |
+| **Model MAE** | 3.48 | **4.25** | **+0.77** |
+
+The baseline barely moved, so 2026 is not intrinsically harder to predict. Only the model degraded — which isolates the cause to its learned competitive order going stale, exactly the failure the Limitations section predicts for a regulation year. Podium hit rate is the one metric where the model beats the baseline anywhere in this project.
+
+Winner accuracy here should be read with care: 8/12 versus 9/12 is a difference of **one race**, with a 95% confidence interval of roughly 35–90%. Position MAE, measured over 264 driver-races, is the number carrying real information.
+
+```bash
+python scripts/eval_holdout.py --season 2026
+```
 
 ### Calibration — does "40%" mean 40%?
 
@@ -118,6 +143,12 @@ python scripts/eval_past.py --misses
 
 ```bash
 python scripts/eval_winners.py
+```
+
+Score the shipped models on a season they were never trained on:
+
+```bash
+python scripts/eval_holdout.py --season 2026
 ```
 
 ### Keeping data current
@@ -195,7 +226,7 @@ Error also rises steadily down the field, which is where chaos concentrates:
 
 ### Scope
 
-- **Training data is 2018–2025.** The live 2026 season is deliberately excluded — training on a part-run season would skew rolling-form and standings features. `python -m app.app upcoming` reads the live calendar independently, so it works once a round's qualifying data is fetched.
+- **Training data is 2018–2025.** The in-progress 2026 season is deliberately held out rather than trained on. It is more valuable as an uncontaminated test set than as ~12 extra rounds of training data, and folding in a part-run season would also skew rolling-form and standings features. 2026 data *is* fetched and used for evaluation (`scripts/eval_holdout.py`), and `python -m app.app` can predict 2026 rounds directly.
 - **Predicting a race inside the training range is in-sample** and will look better than the model's true skill. `scripts/eval_past.py` is the honest measurement.
 - **Requires qualifying to have run.** A race has no grid until then, which in practice means predictions are only possible from the day before.
 - **Sprint points are included** in championship standings, but sprint results themselves are not used as a form signal.
@@ -217,8 +248,8 @@ Error also rises steadily down the field, which is where chaos concentrates:
 ```
 src/        core library — config, data_fetch, features, train, predict, render
 app/        CLI entrypoints — app.py plus the predict_* variants
-scripts/    train_models, eval_past, eval_winners, update_training_data
-tests/      179 tests
+scripts/    train_models, eval_past, eval_holdout, eval_winners, update_training_data
+tests/      187 tests
 data/       raw/ and processed/ (gitignored — regenerable)
 models/     *.joblib artifacts (gitignored — regenerable)
 ```
@@ -231,4 +262,4 @@ The original project had `prediction1.py` through `prediction24.py` — 24 near-
 python -m pytest tests/ -q
 ```
 
-179 tests. The ones worth knowing about assert the properties that fail silently rather than loudly: that CV folds never train on future seasons, that rolling features can't see the race they describe, that win probabilities sum to 1.0 per race, and that the backtest's baseline is computed independently of the model.
+187 tests. The ones worth knowing about assert the properties that fail silently rather than loudly: that CV folds never train on future seasons, that rolling features can't see the race they describe, that win probabilities sum to 1.0 per race, that the backtest's baseline is computed independently of the model, and that a held-out season never reaches the training table.

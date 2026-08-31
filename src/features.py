@@ -357,7 +357,25 @@ def save_feature_table(df: pd.DataFrame, path=config.FEATURE_TABLE_PATH) -> None
 
 
 def load_feature_table(path=config.FEATURE_TABLE_PATH) -> pd.DataFrame:
+    """Load the processed feature table -- every season present on disk."""
     return pd.read_parquet(path)
+
+
+def load_training_table(path=config.FEATURE_TABLE_PATH) -> pd.DataFrame:
+    """The feature table restricted to `config.SEASONS`.
+
+    The processed table deliberately contains every season that has been
+    fetched, including any held out of training (2026). Anything that
+    *fits* a model must go through here, or a held-out season would
+    silently become training data and quietly invalidate its own
+    evaluation.
+    """
+    table = load_feature_table(path)
+    training = table[table["season"].isin(config.SEASONS)]
+    held_out = sorted(set(table["season"]) - set(config.SEASONS))
+    if held_out:
+        logger.info("Excluding held-out season(s) %s from training", held_out)
+    return training.reset_index(drop=True)
 
 
 if __name__ == "__main__":

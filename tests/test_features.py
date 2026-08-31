@@ -363,6 +363,51 @@ def test_require_target_true_is_still_the_default():
     assert len(features.build_feature_table(pd.DataFrame(rows))) == 1
 
 
+def test_training_table_excludes_held_out_seasons(tmp_path):
+    """A held-out season leaking into training would invalidate its own evaluation.
+
+    The processed table deliberately holds every fetched season so held-out
+    rounds can still be featurised and predicted; anything that *fits* a
+    model must go through load_training_table.
+    """
+    in_range = config.SEASON_END
+    held_out = config.SEASON_END + 1
+    table = pd.DataFrame(
+        {
+            "season": [in_range, in_range, held_out, held_out],
+            "round": [1, 2, 1, 2],
+            "driver_id": ["a"] * 4,
+        }
+    )
+    path = tmp_path / "features.parquet"
+    table.to_parquet(path, index=False)
+
+    assert sorted(features.load_feature_table(path)["season"].unique()) == [in_range, held_out]
+    assert features.load_training_table(path)["season"].unique().tolist() == [in_range]
+
+
+def test_training_table_is_unchanged_when_nothing_is_held_out(tmp_path):
+    table = pd.DataFrame({"season": config.SEASONS, "round": 1, "driver_id": "a"})
+    path = tmp_path / "features.parquet"
+    table.to_parquet(path, index=False)
+    assert len(features.load_training_table(path)) == len(config.SEASONS)
+
+
+def test_available_seasons_reads_disk_not_config(tmp_path, monkeypatch):
+    """Fetching a season outside the training range must still make it loadable."""
+    from src import data_fetch
+
+    monkeypatch.setattr(config, "DATA_RAW_DIR", tmp_path)
+    for season in (2030, 2031):
+        d = tmp_path / str(season)
+        d.mkdir()
+        pd.DataFrame({"driver_id": ["a"]}).to_parquet(d / "01.parquet", index=False)
+    (tmp_path / "not_a_season").mkdir()
+    (tmp_path / "2032").mkdir()  # exists but empty -- no parquet
+
+    assert data_fetch.available_seasons() == [2030, 2031]
+
+
 def test_no_duplicate_driver_race_rows():
     rows = [
         make_row(round=r, driver_id=d, constructor_id="team_x" if d in ("a", "b") else "team_y")

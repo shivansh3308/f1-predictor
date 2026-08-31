@@ -131,7 +131,7 @@ def walk_forward_predictions(
     ``scripts/eval_winners.py`` (which measures calibration), so both
     report on exactly the same out-of-sample predictions.
     """
-    table = features.load_feature_table() if table is None else table
+    table = features.load_training_table() if table is None else table
     predicted: list[pd.DataFrame] = []
 
     for label, train_idx, test_idx in train.season_forward_splits(table, n_splits=n_splits):
