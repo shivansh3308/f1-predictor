@@ -61,9 +61,14 @@ def assert_no_leakage(feature_columns: Iterable[str]) -> None:
 
 
 def _is_dnf(status: pd.Series) -> pd.Series:
-    """True where `status` represents a DNF/reliability failure, not a finish."""
+    """True where `status` represents a DNF/reliability failure, not a finish.
+
+    A missing status means the race has not been run yet (a prediction row),
+    which is *unknown*, not a DNF -- returning True there would count every
+    unraced round as a reliability failure against that driver.
+    """
     is_classified = status.eq("Finished") | status.str.startswith("+", na=False) | status.eq("Lapped")
-    return ~is_classified
+    return (~is_classified).where(status.notna())
 
 
 def _constructor_round_level(df: pd.DataFrame, value_col: str, agg: str, out_col: str) -> pd.DataFrame:
@@ -160,7 +165,9 @@ def _add_standings_features(df: pd.DataFrame) -> pd.DataFrame:
     # championship total there. `total_points` is what actually accumulates
     # in the standings; the split race/sprint columns are kept around only
     # as raw inputs.
-    df["total_points"] = df["points"] + df["sprint_points"].fillna(0.0)
+    # fillna(0) on both: an unraced round has no points yet, and leaving it
+    # NaN would poison the cumsum for every subsequent round in the season.
+    df["total_points"] = df["points"].fillna(0.0) + df["sprint_points"].fillna(0.0)
 
     df["driver_points_before_race"] = df.groupby(["season", "driver_id"])["total_points"].transform(
         lambda s: s.cumsum() - s
@@ -218,13 +225,18 @@ def _normalize_pit_lane_starts(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _add_targets(df: pd.DataFrame) -> pd.DataFrame:
-    df[config.TARGET_POSITION] = df["finish_position"]
-    df[config.TARGET_PODIUM] = (df["finish_position"] <= 3).astype(int)
-    df[config.TARGET_WINNER] = (df["finish_position"] == 1).astype(int)
+    finish = df["finish_position"]
+    df[config.TARGET_POSITION] = finish
+    # Left as NaN (not 0) where the race has not been run. A plain
+    # `(finish <= 3).astype(int)` would turn every unraced row into a
+    # confident "did not podium" label, which is a fabricated target that
+    # would quietly corrupt training if such rows were ever included.
+    df[config.TARGET_PODIUM] = (finish <= 3).astype("float").where(finish.notna())
+    df[config.TARGET_WINNER] = (finish == 1).astype("float").where(finish.notna())
     return df
 
 
-def build_feature_table(raw: pd.DataFrame | None = None) -> pd.DataFrame:
+def build_feature_table(raw: pd.DataFrame | None = None, require_target: bool = True) -> pd.DataFrame:
     """Build the full model-ready feature table from raw per-round pulls.
 
     Parameters
@@ -232,13 +244,20 @@ def build_feature_table(raw: pd.DataFrame | None = None) -> pd.DataFrame:
     raw:
         Raw driver-race rows as produced by `data_fetch.load_all_raw()`. If
         not given, loads all cached seasons from `config.DATA_RAW_DIR`.
+    require_target:
+        When True (the default, and what training uses), rows with no
+        finishing position are dropped -- a driver who withdrew before the
+        race has no target to learn from.
+
+        Set False for *prediction*, where the race being predicted has not
+        been run and so no row has a finishing position yet. Keeping those
+        rows is the whole point: their features come from prior races, and
+        their targets stay NaN rather than being fabricated as zeros.
 
     Returns
     -------
     One row per driver-race, containing identity columns, every column in
     `config.FEATURE_COLUMNS`, and every column in `config.TARGET_COLUMNS`.
-    Rows with no valid target (driver withdrew/DNS before the race, so there
-    is no finishing position to predict) are dropped.
     """
     if raw is None:
         raw = data_fetch.load_all_raw()
@@ -248,7 +267,8 @@ def build_feature_table(raw: pd.DataFrame | None = None) -> pd.DataFrame:
     df = raw.copy()
 
     before = len(df)
-    df = df[df["finish_position"].notna()].copy()
+    if require_target:
+        df = df[df["finish_position"].notna()].copy()
     dropped = before - len(df)
     if dropped:
         logger.info(

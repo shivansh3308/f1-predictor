@@ -305,6 +305,64 @@ def test_withdrawal_row_is_dropped_but_others_unaffected():
     assert b_r2["driver_points_before_race"] == 0.0
 
 
+def test_require_target_false_keeps_unraced_rows():
+    """Prediction path: a race that hasn't run yet must survive feature building."""
+    rows = [
+        make_row(round=1, finish_position=1.0, points=25.0),
+        make_row(round=2, finish_position=None, status=None, points=None, grid=3.0),
+    ]
+    table = features.build_feature_table(pd.DataFrame(rows), require_target=False)
+    assert len(table) == 2
+    upcoming = get_row(table, round=2)
+    assert upcoming["grid"] == 3.0
+
+
+def test_unraced_rows_get_null_targets_not_fabricated_zeros():
+    """A fake '0' target would silently corrupt training if such rows leaked in."""
+    rows = [
+        make_row(round=1, finish_position=1.0, points=25.0),
+        make_row(round=2, finish_position=None, status=None, points=None),
+    ]
+    table = features.build_feature_table(pd.DataFrame(rows), require_target=False)
+    upcoming = get_row(table, round=2)
+    assert pd.isna(upcoming[config.TARGET_PODIUM])
+    assert pd.isna(upcoming[config.TARGET_WINNER])
+    assert pd.isna(upcoming[config.TARGET_POSITION])
+
+
+def test_unraced_round_does_not_count_as_a_dnf():
+    """Missing status means 'not run yet', not 'retired'."""
+    rows = [
+        make_row(round=1, finish_position=1.0, status="Finished", points=25.0),
+        make_row(round=2, finish_position=None, status=None, points=None),
+        make_row(round=3, finish_position=2.0, status="Finished", points=18.0),
+    ]
+    table = features.build_feature_table(pd.DataFrame(rows), require_target=False)
+    # Round 3 sees rounds 1-2. Round 2 was never run, so it must not be
+    # counted against the driver as a reliability failure.
+    assert get_row(table, round=3)["driver_dnf_rate"] == 0.0
+
+
+def test_unraced_round_does_not_poison_championship_points():
+    """A NaN points row would otherwise propagate through the cumulative sum."""
+    rows = [
+        make_row(round=1, finish_position=1.0, points=25.0),
+        make_row(round=2, finish_position=None, status=None, points=None),
+        make_row(round=3, finish_position=1.0, points=25.0),
+    ]
+    table = features.build_feature_table(pd.DataFrame(rows), require_target=False)
+    assert get_row(table, round=3)["driver_points_before_race"] == 25.0
+
+
+def test_require_target_true_is_still_the_default():
+    """Training behaviour must be unchanged: target-less rows are dropped."""
+    rows = [
+        make_row(round=1, finish_position=1.0),
+        make_row(round=2, finish_position=None, status="Withdrew"),
+    ]
+    assert len(features.build_feature_table(pd.DataFrame(rows))) == 1
+
+
 def test_no_duplicate_driver_race_rows():
     rows = [
         make_row(round=r, driver_id=d, constructor_id="team_x" if d in ("a", "b") else "team_y")
