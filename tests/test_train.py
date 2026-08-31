@@ -234,6 +234,85 @@ def test_position_and_podium_share_the_same_cv_split():
     assert splits == again, "splits must be deterministic across calls"
 
 
+# ---------------------------------------------------------------------------
+# Winner model / per-race probability normalization
+# ---------------------------------------------------------------------------
+
+
+def _two_race_frame() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "season": [2020, 2020, 2020, 2020],
+            "round": [1, 1, 2, 2],
+            "driver_id": ["a", "b", "a", "b"],
+        }
+    )
+
+
+def test_win_probabilities_sum_to_one_per_race():
+    df = _two_race_frame()
+    out = train.normalize_win_probabilities(df, np.array([0.9, 0.3, 0.2, 0.1]))
+    assert out[:2].sum() == pytest.approx(1.0)
+    assert out[2:].sum() == pytest.approx(1.0)
+
+
+def test_normalization_preserves_ordering_within_a_race():
+    df = _two_race_frame()
+    raw = np.array([0.9, 0.3, 0.1, 0.2])
+    out = train.normalize_win_probabilities(df, raw)
+    assert out[0] > out[1], "race 1 ordering should be preserved"
+    assert out[3] > out[2], "race 2 ordering should be preserved"
+
+
+def test_normalization_does_not_mix_across_races():
+    """A confident race must not deflate a chaotic one, or vice versa."""
+    df = _two_race_frame()
+    # Race 1 sums to 1.2, race 2 sums to 0.2 -- wildly different confidence.
+    out = train.normalize_win_probabilities(df, np.array([0.9, 0.3, 0.1, 0.1]))
+    assert out[:2].sum() == pytest.approx(1.0)
+    assert out[2:].sum() == pytest.approx(1.0)
+    assert out[2] == pytest.approx(0.5), "an even 2-car race should split 50/50 regardless of raw scale"
+
+
+def test_normalization_falls_back_to_uniform_when_all_zero():
+    """Degenerate race: model says nobody wins. Must not divide by zero."""
+    df = _two_race_frame()
+    out = train.normalize_win_probabilities(df, np.array([0.0, 0.0, 0.5, 0.5]))
+    assert out[:2].sum() == pytest.approx(1.0)
+    assert out[0] == pytest.approx(0.5) and out[1] == pytest.approx(0.5)
+    assert np.isfinite(out).all()
+
+
+def test_normalization_rejects_length_mismatch():
+    df = _two_race_frame()
+    with pytest.raises(ValueError, match="probabilities for"):
+        train.normalize_win_probabilities(df, np.array([0.5, 0.5]))
+
+
+def test_normalized_probabilities_stay_in_unit_interval():
+    df = _two_race_frame()
+    out = train.normalize_win_probabilities(df, np.array([0.9, 0.3, 0.2, 0.1]))
+    assert (out >= 0).all() and (out <= 1).all()
+
+
+def test_winner_cv_reports_normalized_metrics():
+    table = make_table()
+    report = train.cross_validate_winner(
+        table, splitter=lambda df: train.season_forward_splits(df, n_splits=3)
+    )
+    assert set(report.metric_names()) == {"auc", "logloss", "top1_acc", "winner_prob"}
+    assert 0.0 <= report.mean("top1_acc") <= 1.0
+
+
+def test_winner_training_is_deterministic():
+    table = make_table()
+    m1, c1 = train.train_winner_model(table)
+    m2, c2 = train.train_winner_model(table)
+    X1, _ = features.build_model_matrix(table, categories=c1)
+    X2, _ = features.build_model_matrix(table, categories=c2)
+    assert np.allclose(m1.predict_proba(X1)[:, 1], m2.predict_proba(X2)[:, 1])
+
+
 def test_save_and_load_model_artifact_round_trip(tmp_path):
     table = make_table()
     model, categories = train.train_podium_model(table)

@@ -143,17 +143,97 @@ def build_position_model() -> XGBRegressor:
     )
 
 
-def _podium_metrics(y_true: np.ndarray, y_prob: np.ndarray) -> dict[str, float]:
+def build_winner_model() -> XGBClassifier:
+    """Fresh, unfitted race-winner classifier.
+
+    Structurally similar to the podium model but a much rarer positive
+    class (173 winners in 3455 rows, ~5%, versus ~15% for podium). The
+    important difference is not the fit but what happens to its output --
+    see `normalize_win_probabilities`.
+    """
+    return XGBClassifier(
+        objective="binary:logistic",
+        eval_metric="logloss",
+        **config.XGB_PARAMS,
+    )
+
+
+def normalize_win_probabilities(
+    df: pd.DataFrame,
+    raw_probabilities: np.ndarray,
+    group_cols: tuple[str, ...] = ("season", "round"),
+) -> np.ndarray:
+    """Scale raw win probabilities so each race's grid sums to exactly 1.0.
+
+    This is the step that makes the winner model more than "podium with
+    k=1" (spec task 11). The classifier scores each driver independently,
+    so nothing ties a race together: a grid of 20 independent
+    "will this driver win?" probabilities typically sums to well above or
+    below 1. But exactly one car wins each race, so the per-race
+    probabilities are a mutually exclusive set and must be a proper
+    distribution before they can be read as "a 34% chance of winning".
+
+    Without this, the numbers are not comparable across races either -- a
+    processional race where the model is confident and a chaotic one where
+    it is not would produce totals that differ by a factor of two, making
+    "40%" mean different things on different weekends.
+
+    Degenerate case: if a race's raw probabilities sum to ~0 (the model is
+    confident nobody wins, which it can be for an unusual grid), fall back
+    to a uniform distribution over that race rather than dividing by zero.
+    """
+    probs = np.asarray(raw_probabilities, dtype=float)
+    if len(probs) != len(df):
+        raise ValueError(f"Got {len(probs)} probabilities for {len(df)} rows")
+
+    out = np.empty_like(probs)
+    race_ids = pd.MultiIndex.from_frame(df[list(group_cols)])
+
+    for _, positions in pd.Series(np.arange(len(df)), index=race_ids).groupby(level=list(range(len(group_cols)))):
+        idx = positions.to_numpy()
+        total = probs[idx].sum()
+        out[idx] = probs[idx] / total if total > 0 else 1.0 / len(idx)
+
+    return out
+
+
+def _podium_metrics(y_true: np.ndarray, y_prob: np.ndarray, test_df: pd.DataFrame) -> dict[str, float]:
     return {
         "auc": float(roc_auc_score(y_true, y_prob)),
         "logloss": float(log_loss(y_true, y_prob, labels=[0, 1])),
     }
 
 
-def _position_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
+def _position_metrics(y_true: np.ndarray, y_pred: np.ndarray, test_df: pd.DataFrame) -> dict[str, float]:
     return {
         "mae": float(mean_absolute_error(y_true, y_pred)),
         "rmse": float(np.sqrt(mean_squared_error(y_true, y_pred))),
+    }
+
+
+def _winner_metrics(y_true: np.ndarray, y_prob: np.ndarray, test_df: pd.DataFrame) -> dict[str, float]:
+    """Winner metrics, reported both raw and after per-race normalization.
+
+    `auc`/`logloss` describe the raw classifier. `top1_acc` is the one that
+    actually matters for the product: after normalizing each race's
+    probabilities to sum to 1, how often is the highest-probability driver
+    the real winner? `winner_prob` is the mean normalized probability
+    assigned to the driver who actually won -- a crude calibration read
+    (task 19 does this properly).
+    """
+    normalized = normalize_win_probabilities(test_df, y_prob)
+
+    race_key = list(zip(test_df["season"], test_df["round"]))
+    frame = pd.DataFrame(
+        {"race": race_key, "prob": normalized, "won": y_true},
+    )
+    picked_winner = frame.loc[frame.groupby("race")["prob"].idxmax(), "won"]
+
+    return {
+        "auc": float(roc_auc_score(y_true, y_prob)),
+        "logloss": float(log_loss(y_true, y_prob, labels=[0, 1])),
+        "top1_acc": float(picked_winner.mean()),
+        "winner_prob": float(np.mean(normalized[y_true == 1])),
     }
 
 
@@ -191,8 +271,9 @@ def cross_validate(
     y_all = table[target].to_numpy()
 
     for label, train_idx, test_idx in splitter(table):
+        test_df = table.iloc[test_idx]
         X_train, categories = features.build_model_matrix(table.iloc[train_idx])
-        X_test, _ = features.build_model_matrix(table.iloc[test_idx], categories=categories)
+        X_test, _ = features.build_model_matrix(test_df, categories=categories)
 
         model = model_factory()
         model.fit(X_train, y_all[train_idx])
@@ -203,7 +284,9 @@ def cross_validate(
                 label=label,
                 n_train=len(train_idx),
                 n_test=len(test_idx),
-                metrics=metric_fn(y_all[test_idx], y_pred),
+                # test_df is passed so per-race metrics (e.g. winner top-1
+                # accuracy) can group by race; simple metrics ignore it.
+                metrics=metric_fn(y_all[test_idx], y_pred, test_df),
             )
         )
 
@@ -234,6 +317,18 @@ def cross_validate_position(table: pd.DataFrame, **kwargs) -> CVReport:
     )
 
 
+def cross_validate_winner(table: pd.DataFrame, **kwargs) -> CVReport:
+    return cross_validate(
+        table,
+        model_name="winner",
+        target=config.TARGET_WINNER,
+        model_factory=build_winner_model,
+        metric_fn=_winner_metrics,
+        predict_fn=_predict_proba,
+        **kwargs,
+    )
+
+
 def _fit_full(table: pd.DataFrame, target: str, model_factory):
     X, categories = features.build_model_matrix(table)
     model = model_factory()
@@ -249,6 +344,11 @@ def train_podium_model(table: pd.DataFrame) -> tuple[XGBClassifier, dict[str, li
 def train_position_model(table: pd.DataFrame) -> tuple[XGBRegressor, dict[str, list]]:
     """Fit the final position model on the full table. Returns `(model, categories)`."""
     return _fit_full(table, config.TARGET_POSITION, build_position_model)
+
+
+def train_winner_model(table: pd.DataFrame) -> tuple[XGBClassifier, dict[str, list]]:
+    """Fit the final winner model on the full table. Returns `(model, categories)`."""
+    return _fit_full(table, config.TARGET_WINNER, build_winner_model)
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +425,7 @@ def format_report(report: CVReport, benchmarks: dict[str, float] | None = None) 
 # ---------------------------------------------------------------------------
 
 
-MODELS = ("podium", "position")
+MODELS = ("podium", "position", "winner")
 
 
 def main() -> None:
@@ -423,6 +523,36 @@ def main() -> None:
                 },
             )
             print(f"\nSaved position model -> {path}")
+
+    if "winner" in args.models:
+        print("\n")
+        honest_win = cross_validate_winner(table)
+        print(format_report(honest_win))
+        print()
+        print(
+            f"Reading: top1_acc is how often the highest normalized probability was the real "
+            f"winner ({honest_win.mean('top1_acc'):.1%}); winner_prob is the mean normalized "
+            f"probability given to the actual winner ({honest_win.mean('winner_prob'):.1%}). "
+            f"A uniform 20-car guess would score 5.0% on both."
+        )
+
+        if args.save:
+            model, categories = train_winner_model(table)
+            path = save_model_artifact(
+                model,
+                categories,
+                config.WINNER_MODEL_PATH,
+                metadata={
+                    "cv_strategy": honest_win.strategy,
+                    "cv_auc": honest_win.mean("auc"),
+                    "cv_logloss": honest_win.mean("logloss"),
+                    "cv_top1_acc": honest_win.mean("top1_acc"),
+                    "normalization": "per-race probabilities normalized to sum to 1.0",
+                    "n_rows": len(table),
+                    "seasons": sorted(table["season"].unique().tolist()),
+                },
+            )
+            print(f"\nSaved winner model -> {path}")
 
 
 if __name__ == "__main__":
