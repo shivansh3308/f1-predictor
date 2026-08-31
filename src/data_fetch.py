@@ -19,6 +19,7 @@ from pathlib import Path
 
 import fastf1
 import pandas as pd
+from fastf1.exceptions import RateLimitExceededError
 
 from src import config
 
@@ -32,6 +33,17 @@ _CACHE_ENABLED = False
 # a given (season, round) and should just be skipped.
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = 5.0
+
+# FastF1 enforces a shared "500 calls/h" limit across all APIs, using a
+# rolling window (a deque of the last 500 call timestamps). Critically, it
+# timestamps a call *before* checking the count, so a rejected call still
+# occupies a slot in that window — hammering it with quick retries only
+# keeps refreshing the window with new failures and pushes the reset further
+# away. So instead of the normal short backoff, a rate-limit hit gets exactly
+# one long cooldown (comfortably longer than the 60-minute window) and then
+# one retry. No further requests are made during the cooldown, so the window
+# is guaranteed to have cleared by the time it ends.
+RATE_LIMIT_COOLDOWN_SECONDS = 65 * 60
 
 # Columns pulled from a Qualifying session.load() result.
 _QUALI_COLUMNS = ["DriverId", "Position", "Q1", "Q2", "Q3"]
@@ -89,9 +101,12 @@ def _with_retries(fn, *args, retries: int = MAX_RETRIES, backoff: float = RETRY_
     """Call ``fn(*args, **kwargs)``, retrying transient errors with backoff.
 
     Permanent errors (`_NON_RETRYABLE_EXCEPTIONS` — invalid round, session
-    that doesn't exist for this event, ...) are raised immediately. Anything
-    else (network errors, rate limiting) is retried; on the final attempt it
-    propagates to the caller, which treats it as "this round is unavailable".
+    that doesn't exist for this event, ...) are raised immediately.
+    Rate-limit errors get one long cooldown + one retry (see
+    `RATE_LIMIT_COOLDOWN_SECONDS`), not the short backoff below. Anything
+    else (network blips) is retried with short backoff; on the final attempt
+    it propagates to the caller, which treats it as "this round is
+    unavailable".
     """
     last_exc: Exception | None = None
     for attempt in range(1, retries + 1):
@@ -99,6 +114,16 @@ def _with_retries(fn, *args, retries: int = MAX_RETRIES, backoff: float = RETRY_
             return fn(*args, **kwargs)
         except _NON_RETRYABLE_EXCEPTIONS:
             raise
+        except RateLimitExceededError as exc:
+            logger.warning(
+                "FastF1 rate limit hit (%s). Retrying immediately would only push the "
+                "reset further out (rejected calls still count against the window), so "
+                "cooling down for %d minutes instead of retrying quickly...",
+                exc,
+                RATE_LIMIT_COOLDOWN_SECONDS // 60,
+            )
+            time.sleep(RATE_LIMIT_COOLDOWN_SECONDS)
+            return fn(*args, **kwargs)  # single retry; let this raise if still limited
         except Exception as exc:  # noqa: BLE001 - FastF1/requests raise a mix of types
             last_exc = exc
             if attempt == retries:
