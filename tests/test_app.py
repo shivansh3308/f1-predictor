@@ -179,6 +179,42 @@ def test_fetch_flag_retries_after_pulling_the_round(monkeypatch):
     assert attempts["n"] == 2, "should render again after a successful fetch"
 
 
+def test_predict_any_entrypoint_routes_to_the_requested_round(rendered):
+    from app import predict_any
+
+    assert predict_any.main(["2023", "5", "--top", "4"]) == app.EXIT_OK
+    assert (rendered[0]["season"], rendered[0]["round"], rendered[0]["top_n"]) == (2023, 5, 4)
+
+
+def test_predict_upcoming_entrypoint_uses_the_calendar(rendered, fake_calendar):
+    from app import predict_upcoming
+
+    assert predict_upcoming.main([]) == app.EXIT_OK
+    assert (rendered[0]["season"], rendered[0]["round"]) == (2030, 7)
+
+
+def test_predict_latest_done_entrypoint_compares_against_results(rendered, fake_calendar):
+    from app import predict_latest_done
+
+    assert predict_latest_done.main([]) == app.EXIT_OK
+    assert (rendered[0]["season"], rendered[0]["round"]) == (2030, 6)
+    assert rendered[0]["show_actual"] is True
+
+
+def test_entrypoints_share_one_implementation_with_the_subcommands(rendered, fake_calendar):
+    """The wrappers must not grow their own copy of the logic."""
+    from app import predict_latest_done
+
+    predict_latest_done.main([])
+    app.main(["latest"])
+
+    # `models` is a fresh mock object per call, so compare everything else.
+    def routing(call: dict) -> dict:
+        return {k: v for k, v in call.items() if k != "models"}
+
+    assert routing(rendered[0]) == routing(rendered[1])
+
+
 def test_fetch_flag_gives_up_cleanly_when_the_round_cannot_be_fetched(monkeypatch, capsys):
     monkeypatch.setattr(app.predict, "load_models", lambda: object())
     monkeypatch.setattr(
