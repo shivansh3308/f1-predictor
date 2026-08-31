@@ -197,6 +197,26 @@ def _add_standings_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _normalize_pit_lane_starts(df: pd.DataFrame) -> pd.DataFrame:
+    """Re-encode pit-lane starts (`grid == 0`) as back-of-grid.
+
+    FastF1 reports a pit-lane start as grid position 0. Left as-is, that
+    inverts the meaning of the single strongest feature in the model: 0
+    sorts as *better than pole*, when a pit-lane start is in fact worse
+    than last on the grid. Measured over 2018-2025, `grid == 0` rows
+    average a 14.1 finish with a 0.000 podium rate -- i.e. they behave
+    like the very back (grid 18-20 average ~14.6), nothing like pole
+    (3.5 / 0.798).
+
+    Remapping to `max(grid) + 1` within the round restores a monotonic
+    "higher number = worse start" ordering, so the model can use a clean
+    split instead of having to carve out 0 as a special case.
+    """
+    grid_max = df.groupby(["season", "round"])["grid"].transform("max")
+    df["grid"] = df["grid"].mask(df["grid"] == 0, grid_max + 1)
+    return df
+
+
 def _add_targets(df: pd.DataFrame) -> pd.DataFrame:
     df[config.TARGET_POSITION] = df["finish_position"]
     df[config.TARGET_PODIUM] = (df["finish_position"] <= 3).astype(int)
@@ -238,6 +258,7 @@ def build_feature_table(raw: pd.DataFrame | None = None) -> pd.DataFrame:
 
     df = df.rename(columns={"circuit": "circuit_id"})
 
+    df = _normalize_pit_lane_starts(df)
     df = _add_rolling_form_features(df)
     df = _add_dnf_rate_features(df)
     df = _add_standings_features(df)

@@ -233,6 +233,45 @@ def test_standing_before_race_ranks_by_prior_points():
 
 
 # ---------------------------------------------------------------------------
+# 4b. Pit-lane starts
+# ---------------------------------------------------------------------------
+
+
+def test_pit_lane_start_is_remapped_to_back_of_grid():
+    """grid==0 (pit lane) must become worse than last, not better than pole."""
+    rows = [
+        make_row(round=1, driver_id="pole", grid=1.0, finish_position=1.0),
+        make_row(round=1, driver_id="last", grid=3.0, finish_position=2.0),
+        make_row(round=1, driver_id="pitlane", grid=0.0, finish_position=3.0),
+    ]
+    table = build(rows)
+    pit = get_row(table, round=1, driver_id="pitlane")
+    assert pit["grid"] == 4.0, "pit-lane start should sort behind the last real grid slot (3 -> 4)"
+    assert pit["grid"] > get_row(table, round=1, driver_id="last")["grid"]
+    assert pit["grid"] > get_row(table, round=1, driver_id="pole")["grid"]
+
+
+def test_pit_lane_remap_is_per_round():
+    """The remap uses each round's own grid size, not a global constant."""
+    rows = [
+        make_row(round=1, driver_id="a", grid=2.0),
+        make_row(round=1, driver_id="pit1", grid=0.0),
+        make_row(round=2, driver_id="a", grid=5.0),
+        make_row(round=2, driver_id="pit1", grid=0.0),
+    ]
+    table = build(rows)
+    assert get_row(table, round=1, driver_id="pit1")["grid"] == 3.0
+    assert get_row(table, round=2, driver_id="pit1")["grid"] == 6.0
+
+
+def test_normal_grid_positions_are_untouched():
+    rows = [make_row(round=1, driver_id=f"d{i}", grid=float(i)) for i in range(1, 6)]
+    table = build(rows)
+    for i in range(1, 6):
+        assert get_row(table, round=1, driver_id=f"d{i}")["grid"] == float(i)
+
+
+# ---------------------------------------------------------------------------
 # 5. Row counts / dropped rows
 # ---------------------------------------------------------------------------
 
@@ -361,5 +400,40 @@ def test_real_dataset_invariants():
     assert table["is_winner"].sum() == n_rounds, "exactly one winner per round"
     assert table["podium_finish"].sum() == n_rounds * 3, "exactly three podium finishers per round"
     assert table.duplicated(subset=["season", "round", "driver_id"]).sum() == 0
+    assert (table["grid"] == 0).sum() == 0, "pit-lane starts should have been remapped off 0"
     for col in _ALWAYS_POPULATED:
         assert table[col].isnull().sum() == 0
+
+
+# ---------------------------------------------------------------------------
+# 8. data_fetch round-completeness gate (guards against silently keeping a
+#    round that was persisted with degraded data during a failed fetch).
+# ---------------------------------------------------------------------------
+
+
+def test_is_round_complete_rejects_round_with_no_quali(tmp_path):
+    from src import data_fetch
+
+    path = tmp_path / "01.parquet"
+    pd.DataFrame([make_row(round=1, quali_position=None), make_row(round=1, driver_id="b", quali_position=None)]).to_parquet(
+        path, index=False
+    )
+    assert data_fetch.is_round_complete(path) is False
+
+
+def test_is_round_complete_accepts_normal_round(tmp_path):
+    from src import data_fetch
+
+    path = tmp_path / "01.parquet"
+    pd.DataFrame([make_row(round=1, quali_position=1.0), make_row(round=1, driver_id="b", quali_position=None)]).to_parquet(
+        path, index=False
+    )
+    assert data_fetch.is_round_complete(path) is True, "a single non-null quali entry means the session loaded"
+
+
+def test_is_round_complete_rejects_unreadable_file(tmp_path):
+    from src import data_fetch
+
+    path = tmp_path / "broken.parquet"
+    path.write_text("not a parquet file")
+    assert data_fetch.is_round_complete(path) is False

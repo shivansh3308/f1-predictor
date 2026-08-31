@@ -304,7 +304,11 @@ def fetch_round_raw(season: int, round_number: int) -> pd.DataFrame | None:
     event = race.event
     sprint_points = _fetch_sprint_points(season, round_number, str(event.get("EventFormat", "")))
     merged = merged.merge(sprint_points, on="driver_id", how="left")
-    merged["sprint_points"] = merged["sprint_points"].fillna(0.0)
+    # to_numeric before fillna: on a non-sprint weekend the merged-in frame
+    # is empty, so the column arrives as object dtype and a bare fillna(0.0)
+    # would silently downcast (deprecated in pandas, and leaves the column
+    # object-typed for parquet). Force float explicitly.
+    merged["sprint_points"] = pd.to_numeric(merged["sprint_points"], errors="coerce").fillna(0.0)
 
     merged.insert(0, "season", season)
     merged.insert(1, "round", round_number)
@@ -331,18 +335,52 @@ def save_raw_round(df: pd.DataFrame, season: int, round_number: int) -> Path:
     return path
 
 
+def is_round_complete(path: Path) -> bool:
+    """True if the cached round on disk has full data (not a degraded save).
+
+    `fetch_round_raw` deliberately degrades gracefully when the qualifying
+    session can't be loaded -- it keeps the race results and leaves the
+    quali columns empty rather than losing the round entirely. That's the
+    right call mid-fetch, but it means a transient failure (rate limit,
+    upstream blip) can persist a round that is permanently missing its
+    quali features. Without this check, `fetch_season_raw`'s skip-if-exists
+    logic would treat that degraded file as done and never retry it.
+
+    Seen in practice: 2021 rounds 15/20/21/22 were saved with zero
+    qualifying data during a rate-limited run, and re-fetching later
+    recovered all of it -- the data was always available upstream.
+    """
+    try:
+        cached = pd.read_parquet(path, columns=["quali_position"])
+    except Exception:  # noqa: BLE001 - unreadable/corrupt file is also "not complete"
+        return False
+    # A real round always has *some* qualifying classification. All-null
+    # means the quali fallback path ran, so the round is worth retrying.
+    return not cached["quali_position"].isna().all()
+
+
 def fetch_season_raw(season: int, force: bool = False) -> list[Path]:
     """Fetch every completed round of ``season`` and persist it to data/raw/.
 
-    Rounds already on disk are skipped unless ``force=True``.
+    Rounds already on disk are skipped unless ``force=True`` -- except
+    rounds that were saved with degraded data (see `is_round_complete`),
+    which are always retried so a transient failure doesn't become
+    permanently missing features.
     """
     saved_paths: list[Path] = []
     for s, round_number, event_name in iter_completed_rounds([season]):
         path = _raw_round_path(s, round_number)
         if path.exists() and not force:
-            logger.info("Round %d (%s) already cached at %s — skipping", round_number, event_name, path)
-            saved_paths.append(path)
-            continue
+            if is_round_complete(path):
+                logger.info("Round %d (%s) already cached at %s — skipping", round_number, event_name, path)
+                saved_paths.append(path)
+                continue
+            logger.warning(
+                "Round %d (%s) cached at %s is missing qualifying data — re-fetching",
+                round_number,
+                event_name,
+                path,
+            )
 
         logger.info("Fetching %d round %d: %s", s, round_number, event_name)
         round_df = fetch_round_raw(s, round_number)
@@ -361,12 +399,38 @@ def fetch_all_seasons_raw(seasons: list[int] | None = None, force: bool = False)
     return all_paths
 
 
+# Columns that must be numeric after loading. A round where one of these is
+# entirely absent (e.g. nobody reached Q3) round-trips through parquet as an
+# all-null object column, which makes pd.concat's dtype resolution ambiguous
+# (a deprecated behaviour) and can leave the concatenated column object-typed.
+# Coercing per frame keeps every round's schema identical before concat.
+_NUMERIC_RAW_COLUMNS = [
+    "grid",
+    "finish_position",
+    "points",
+    "sprint_points",
+    "laps",
+    "quali_position",
+    "q1_time_s",
+    "q2_time_s",
+    "q3_time_s",
+]
+
+
+def _normalize_raw_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    for col in _NUMERIC_RAW_COLUMNS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
 def load_raw_season(season: int) -> pd.DataFrame:
     """Load and concatenate every cached round parquet for a season."""
     season_dir = config.DATA_RAW_DIR / str(season)
     if not season_dir.exists():
         return pd.DataFrame()
-    frames = [pd.read_parquet(p) for p in sorted(season_dir.glob("*.parquet"))]
+    frames = [_normalize_raw_dtypes(pd.read_parquet(p)) for p in sorted(season_dir.glob("*.parquet"))]
+    frames = [f for f in frames if not f.empty]
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
