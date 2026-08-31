@@ -1,0 +1,45 @@
+# FastF1 cache — regenerable, large
+.fastf1_cache/
+
+# Virtual environments
+.venv*/
+venv/
+env/
+
+# Data — regenerable from FastF1
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Trained model artifacts — regenerable via scripts/train_models.py
+models/*.joblib
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Testing / tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
