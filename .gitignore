@@ -43,3 +43,6 @@ htmlcov/
 .DS_Store
 .vscode/
 .idea/
+
+# Claude Code local settings/session state
+.claude/
