@@ -49,6 +49,14 @@ def ensure_directories() -> None:
 
 SEASON_START: Final[int] = 2018
 SEASON_END: Final[int] = 2025  # inclusive
+# NOTE: deliberately stops at 2025 (complete seasons only) even though it's
+# already 2026 as this is being written. Plan: finish the full pipeline
+# (fetch/features/train/predict/render/tests) and reproduce the benchmark
+# metrics against 2018-2025 first, matching the original spec. Only *after*
+# that's validated, bump this to include 2026 as a second pass -- training
+# on a still-in-progress season would skew rolling-average/standings
+# features. `predict_upcoming.py` (task 15) is what reaches out live for
+# whatever round is next regardless of this constant.
 SEASONS: Final[list[int]] = list(range(SEASON_START, SEASON_END + 1))
 
 # ---------------------------------------------------------------------------
