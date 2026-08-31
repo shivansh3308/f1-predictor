@@ -66,6 +66,22 @@ def _is_dnf(status: pd.Series) -> pd.Series:
     return ~is_classified
 
 
+def _constructor_round_level(df: pd.DataFrame, value_col: str, agg: str, out_col: str) -> pd.DataFrame:
+    """Aggregate `value_col` to one row per (season, round, constructor_id).
+
+    Required before any backward-shift over constructor history. Two
+    teammates share a round, so shifting a plain per-driver-row series
+    (`groupby("constructor_id")...shift(1)`) shifts across *rows*, not
+    *rounds* -- when both cars finish the same round, that can pull one
+    driver's teammate's SAME-round result into their own "prior" feature,
+    which is leakage (that result isn't known until this race is run).
+    Aggregating to one row per round first, then shifting, closes that gap.
+    """
+    result = df.groupby(["season", "round", "constructor_id"], as_index=False)[value_col].agg(agg)
+    result = result.rename(columns={value_col: out_col}).sort_values(["season", "round"], kind="stable")
+    return result
+
+
 def _add_rolling_form_features(df: pd.DataFrame) -> pd.DataFrame:
     """Driver/constructor rolling-average finish position, backward-looking only.
 
@@ -83,8 +99,18 @@ def _add_rolling_form_features(df: pd.DataFrame) -> pd.DataFrame:
         lambda s: s.shift(1).rolling(window=config.ROLLING_WINDOW, min_periods=1).mean()
     )
 
-    df["constructor_rolling_avg_finish"] = df.groupby("constructor_id")["finish_position"].transform(
-        lambda s: s.shift(1).rolling(window=config.ROLLING_WINDOW, min_periods=1).mean()
+    # Constructor form: average both cars' finish position within each round
+    # first (one value per round), THEN shift/roll over rounds -- see
+    # `_constructor_round_level` for why the naive per-row groupby is wrong.
+    constructor_round = _constructor_round_level(df, "finish_position", "mean", "constructor_round_finish")
+    constructor_round["constructor_rolling_avg_finish"] = constructor_round.groupby("constructor_id")[
+        "constructor_round_finish"
+    ].transform(lambda s: s.shift(1).rolling(window=config.ROLLING_WINDOW, min_periods=1).mean())
+
+    df = df.merge(
+        constructor_round[["season", "round", "constructor_id", "constructor_rolling_avg_finish"]],
+        on=["season", "round", "constructor_id"],
+        how="left",
     )
 
     return df
@@ -98,8 +124,19 @@ def _add_dnf_rate_features(df: pd.DataFrame) -> pd.DataFrame:
     df["driver_dnf_rate"] = df.groupby("driver_id")["_is_dnf"].transform(
         lambda s: s.shift(1).expanding(min_periods=1).mean()
     )
-    df["constructor_dnf_rate"] = df.groupby("constructor_id")["_is_dnf"].transform(
-        lambda s: s.shift(1).expanding(min_periods=1).mean()
+
+    # Same round-level-first requirement as constructor rolling form (see
+    # `_constructor_round_level`): average both cars' DNF flag within the
+    # round, then shift/expand over rounds.
+    constructor_round = _constructor_round_level(df, "_is_dnf", "mean", "constructor_round_dnf")
+    constructor_round["constructor_dnf_rate"] = constructor_round.groupby("constructor_id")[
+        "constructor_round_dnf"
+    ].transform(lambda s: s.shift(1).expanding(min_periods=1).mean())
+
+    df = df.merge(
+        constructor_round[["season", "round", "constructor_id", "constructor_dnf_rate"]],
+        on=["season", "round", "constructor_id"],
+        how="left",
     )
 
     return df.drop(columns=["_is_dnf"])
