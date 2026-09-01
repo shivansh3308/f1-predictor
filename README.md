@@ -152,6 +152,10 @@ python -m app.app any 2021 22 --top 10
 python -m app.app calendar --season 2026
 ```
 
+```bash
+python -m app.app standings --season 2025
+```
+
 Add `--actual` to compare predictions against the real result, and `--fetch` to pull a round that isn't cached locally.
 
 ### Evaluation
@@ -268,7 +272,7 @@ Error also rises steadily down the field, which is where chaos concentrates:
 src/        core library — config, data_fetch, features, train, predict, render
 app/        CLI entrypoints — app.py plus the predict_* variants
 scripts/    train_models, eval_past, eval_holdout, eval_winners, update_training_data
-tests/      189 tests
+tests/      191 tests
 data/       raw/ and processed/ (gitignored — regenerable)
 models/     *.joblib artifacts (gitignored — regenerable)
 ```
@@ -281,4 +285,4 @@ The original project had `prediction1.py` through `prediction24.py` — 24 near-
 python -m pytest tests/ -q
 ```
 
-189 tests. The ones worth knowing about assert the properties that fail silently rather than loudly: that CV folds never train on future seasons, that rolling features can't see the race they describe, that win probabilities sum to 1.0 per race, that the backtest's baseline is computed independently of the model, and that a held-out season never reaches the training table.
+191 tests. The ones worth knowing about assert the properties that fail silently rather than loudly: that CV folds never train on future seasons, that rolling features can't see the race they describe, that win probabilities sum to 1.0 per race, that the backtest's baseline is computed independently of the model, and that a held-out season never reaches the training table.

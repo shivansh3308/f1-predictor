@@ -29,28 +29,52 @@ EXIT_NO_MODELS = 2
 
 
 def _explain_missing_round(season: int, round_number: int) -> str:
-    """Actionable guidance when a round has no data, rather than a bare error."""
-    lines = [
-        f"No data available for {season} round {round_number}.",
-        "",
-    ]
-    if season not in config.SEASONS:
+    """Actionable guidance when a round has no data, rather than a bare error.
+
+    Distinguishes the three genuinely different causes -- season never
+    fetched, round not yet fetched, and round simply hasn't been run yet.
+    Telling someone to fetch a season they already have (or a race that
+    has not happened) is worse than saying nothing.
+    """
+    lines = [f"No data available for {season} round {round_number}.", ""]
+
+    fetched = data_fetch.available_seasons()
+    if season not in fetched:
         lines += [
-            f"The dataset currently covers {config.SEASON_START}-{config.SEASON_END}.",
-            f"To include {season}:",
-            f"    python -m src.data_fetch --seasons {season}",
+            f"Season {season} has not been fetched. Seasons on disk: "
+            f"{fetched[0]}-{fetched[-1]}." if fetched else f"Season {season} has not been fetched.",
+            "",
+            "    python -m src.data_fetch --seasons %d" % season,
             "    python -m src.features",
         ]
-    else:
+        return "\n".join(lines)
+
+    # The season exists. Is this round in the future, or just not fetched?
+    try:
+        from app import app_calendar
+
+        calendar = app_calendar.get_calendar(season)
+        match = calendar[calendar["round"] == round_number]
+    except Exception:  # noqa: BLE001 - calendar lookup is best-effort here
+        match = None
+
+    if match is not None and not match.empty and not bool(match["has_run"].iloc[0]):
+        event = match["event_name"].iloc[0]
+        date = match["event_date"].iloc[0].date()
         lines += [
-            "That season is in the dataset, but this round is not.",
-            f"    python -m src.data_fetch --seasons {season}",
-            "    python -m src.features",
+            f"{event} has not been run yet -- it is scheduled for {date}.",
+            "",
+            "A race cannot be predicted until qualifying sets the grid,",
+            "which is typically the day before. Try again then with:",
+            f"    python -m app.app any {season} {round_number} --fetch",
         ]
+        return "\n".join(lines)
+
     lines += [
+        f"Season {season} is on disk but this round is not cached yet.",
         "",
-        "Note: predicting a race needs its grid, which only exists once",
-        "qualifying has run -- typically the day before the race.",
+        f"    python -m src.data_fetch --seasons {season}",
+        "    python -m src.features",
     ]
     return "\n".join(lines)
 
@@ -160,6 +184,66 @@ def cmd_latest(args: argparse.Namespace) -> int:
     )
 
 
+def cmd_standings(args: argparse.Namespace) -> int:
+    """Championship standings after a given round (default: the latest run).
+
+    Read straight from the feature table's `*_points_before_race` columns,
+    which hold the championship total *entering* each round. Standings
+    after round N are therefore the values carried into round N+1, plus
+    round N's own points. Sprint points are included.
+
+    Caveat: a driver who changed teams mid-season is attributed to the
+    team they were with at the chosen round, so constructor totals can
+    differ from the official table in a transfer year.
+    """
+    table = features.load_feature_table()
+    season = args.season if args.season is not None else int(table["season"].max())
+    season_rows = table[table["season"] == season]
+
+    if season_rows.empty:
+        print(f"No data for {season}. Fetch it with: python -m src.data_fetch --seasons {season}")
+        return EXIT_NO_DATA
+
+    last_round = args.round if args.round is not None else int(season_rows["round"].max())
+    upto = season_rows[season_rows["round"] <= last_round]
+    if upto.empty:
+        print(f"{season} has no rounds up to {last_round}.")
+        return EXIT_NO_DATA
+
+    # points_before_race entering the final round, plus that round's result.
+    final = upto[upto["round"] == upto["round"].max()]
+    drivers = (
+        final.assign(
+            points=lambda d: d["driver_points_before_race"]
+            + d["finish_position"].map(_POINTS_FOR_POSITION).fillna(0.0)
+        )
+        .groupby(["driver_id", "constructor_id"], as_index=False)["points"]
+        .max()
+        .sort_values("points", ascending=False)
+    )
+
+    print(f"{season} drivers' championship -- after round {last_round} "
+          f"({predict.race_label(season, last_round, table=table)})\n")
+    for rank, (_, row) in enumerate(drivers.head(args.top).iterrows(), start=1):
+        print(f"  {rank:>2}  {row['driver_id']:<18} {row['constructor_id']:<14} {row['points']:>6.0f}")
+
+    constructors = drivers.groupby("constructor_id", as_index=False)["points"].sum().sort_values(
+        "points", ascending=False
+    )
+    print(f"\n{season} constructors' championship\n")
+    for rank, (_, row) in enumerate(constructors.iterrows(), start=1):
+        print(f"  {rank:>2}  {row['constructor_id']:<20} {row['points']:>6.0f}")
+    return EXIT_OK
+
+
+# Points awarded for a main-race finishing position (2010-present system).
+# Sprint points are already folded into `*_points_before_race` upstream.
+_POINTS_FOR_POSITION = {
+    1.0: 25.0, 2.0: 18.0, 3.0: 15.0, 4.0: 12.0, 5.0: 10.0,
+    6.0: 8.0, 7.0: 6.0, 8.0: 4.0, 9.0: 2.0, 10.0: 1.0,
+}
+
+
 def cmd_calendar(args: argparse.Namespace) -> int:
     """List a season's calendar with completion status."""
     season = args.season if args.season is not None else app_calendar.current_season()
@@ -225,6 +309,12 @@ def build_parser() -> argparse.ArgumentParser:
     calendar_parser = subparsers.add_parser("calendar", help="List a season's calendar")
     calendar_parser.add_argument("--season", type=int, default=None)
     calendar_parser.set_defaults(func=cmd_calendar)
+
+    standings_parser = subparsers.add_parser("standings", help="Championship standings for a season")
+    standings_parser.add_argument("--season", type=int, default=None, help="Season (default: latest in data)")
+    standings_parser.add_argument("--round", type=int, default=None, help="Standings after this round")
+    standings_parser.add_argument("--top", type=int, default=10, help="How many drivers to list")
+    standings_parser.set_defaults(func=cmd_standings)
 
     return parser
 

@@ -128,16 +128,58 @@ def test_missing_round_exits_with_no_data_code(monkeypatch, capsys):
     assert "No data available for 2026 round 13" in capsys.readouterr().err
 
 
-def test_missing_round_message_is_actionable(monkeypatch, capsys):
-    """A bare error is not enough -- tell the user the command to run."""
-    monkeypatch.setattr(app.predict, "load_models", lambda: object())
+def test_unfetched_season_message_says_to_fetch_it(monkeypatch):
+    """Cause 1: the season was never pulled."""
+    monkeypatch.setattr(app.data_fetch, "available_seasons", lambda: [2018, 2019])
+    message = app._explain_missing_round(2026, 13)
+    assert "has not been fetched" in message
+    assert "python -m src.data_fetch --seasons 2026" in message
+
+
+def test_future_round_message_says_it_has_not_run(monkeypatch):
+    """Cause 2: the season is on disk but this race is still in the future.
+
+    Telling someone to fetch data for a race that has not happened is
+    actively misleading, so this branch must not do that.
+    """
+    monkeypatch.setattr(app.data_fetch, "available_seasons", lambda: [2026])
     monkeypatch.setattr(
-        app.render, "render_round", lambda *a, **k: (_ for _ in ()).throw(predict.RoundNotFoundError("nope"))
+        app_calendar,
+        "get_calendar",
+        lambda season: pd.DataFrame(
+            {
+                "round": [13],
+                "event_name": ["Italian Grand Prix"],
+                "event_date": [pd.Timestamp("2026-09-06")],
+                "has_run": [False],
+            }
+        ),
     )
-    app.predict_and_render(2026, 13)
-    err = capsys.readouterr().err
-    assert "python -m src.data_fetch --seasons 2026" in err
-    assert "qualifying" in err, "should explain that a grid requires qualifying to have run"
+    message = app._explain_missing_round(2026, 13)
+    assert "has not been run yet" in message
+    assert "2026-09-06" in message
+    assert "qualifying" in message, "should explain that a grid requires qualifying"
+    assert "src.data_fetch" not in message, "must not tell the user to fetch an unraced race"
+
+
+def test_uncached_round_message_says_to_fetch_the_season(monkeypatch):
+    """Cause 3: season on disk, race has run, but this round is not cached."""
+    monkeypatch.setattr(app.data_fetch, "available_seasons", lambda: [2026])
+    monkeypatch.setattr(
+        app_calendar,
+        "get_calendar",
+        lambda season: pd.DataFrame(
+            {
+                "round": [5],
+                "event_name": ["Some Grand Prix"],
+                "event_date": [pd.Timestamp("2026-05-03")],
+                "has_run": [True],
+            }
+        ),
+    )
+    message = app._explain_missing_round(2026, 5)
+    assert "not cached yet" in message
+    assert "python -m src.data_fetch --seasons 2026" in message
 
 
 def test_upcoming_with_no_scheduled_round_exits_no_data(monkeypatch, rendered):
