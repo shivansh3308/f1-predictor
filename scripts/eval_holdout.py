@@ -59,7 +59,7 @@ def predict_season(season: int, models: predict.LoadedModels | None = None) -> p
         return X
 
     rows["prob_podium"] = models.podium["model"].predict_proba(matrix(models.podium))[:, 1]
-    rows["pred_position"] = models.position["model"].predict(matrix(models.position))
+    rows["pred_position"] = train.predict_position(models.position["model"], matrix(models.position), rows["grid"])
     rows["prob_win"] = train.normalize_win_probabilities(
         rows, models.winner["model"].predict_proba(matrix(models.winner))[:, 1]
     )

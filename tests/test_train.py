@@ -31,9 +31,9 @@ def make_table(seasons=(2018, 2019, 2020, 2021, 2022, 2023), rounds_per_season=3
                         "constructor_id": f"team_{d % 2}",
                         "grid": float(d + 1),
                         "quali_position": float(d + 1),
-                        "q1_time_s": 90.0 + d,
-                        "q2_time_s": None,
-                        "q3_time_s": None,
+                        "q1_gap_s": float(d) * 0.3,
+                        "q2_gap_s": None,
+                        "q3_gap_s": None,
                         "driver_rolling_avg_finish": float(d + 1),
                         "constructor_rolling_avg_finish": float(d + 1),
                         "driver_points_before_race": float(10 - d),
@@ -44,6 +44,7 @@ def make_table(seasons=(2018, 2019, 2020, 2021, 2022, 2023), rounds_per_season=3
                         "driver_dnf_rate": 0.1,
                         "constructor_dnf_rate": 0.1,
                         config.TARGET_POSITION: float(d + 1),
+                        config.TARGET_POSITION_DELTA: 0.0,
                         config.TARGET_PODIUM: int(d < 3),
                         config.TARGET_WINNER: int(d == 0),
                     }
@@ -162,10 +163,10 @@ def test_model_matrix_coerces_all_null_numeric_column():
     missing.
     """
     table = make_table()
-    table["q3_time_s"] = None
+    table["q3_gap_s"] = None
     X, _ = features.build_model_matrix(table)
-    assert X["q3_time_s"].isna().all()
-    assert X["q3_time_s"].dtype.kind == "f", "all-null numeric feature should coerce to float, not object"
+    assert X["q3_gap_s"].isna().all()
+    assert X["q3_gap_s"].dtype.kind == "f", "all-null numeric feature should coerce to float, not object"
 
 
 # ---------------------------------------------------------------------------

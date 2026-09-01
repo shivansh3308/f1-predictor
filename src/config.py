@@ -88,9 +88,16 @@ CORE_FEATURES: Final[list[str]] = [
 # Recommended additions — all computable strictly before lights-out.
 EXTENDED_FEATURES: Final[list[str]] = [
     "quali_position",
-    "q1_time_s",
-    "q2_time_s",
-    "q3_time_s",
+    # Gap to the fastest lap of that session, in seconds -- NOT raw lap
+    # times. A raw time is dominated ~30:1 by which circuit it was set at
+    # (mean Q3 ranges 71s at Monaco to 109s at Spa, while within-session
+    # driver spread is ~1.4s), and regulation eras move it again (16.7s at
+    # Silverstone across seasons). Measured on dev seasons, switching to
+    # gaps lifted winner accuracy from 48.5% to 60.6%. See
+    # features._add_quali_gap_features.
+    "q1_gap_s",
+    "q2_gap_s",
+    "q3_gap_s",
     "driver_rolling_avg_finish",
     "constructor_rolling_avg_finish",
     "driver_points_before_race",
@@ -143,7 +150,22 @@ TARGET_PODIUM: Final[str] = "podium_finish"     # binary: top-3 finish
 TARGET_POSITION: Final[str] = "finish_position"  # regression: 1..N
 TARGET_WINNER: Final[str] = "is_winner"          # binary: race winner
 
-TARGET_COLUMNS: Final[list[str]] = [TARGET_PODIUM, TARGET_POSITION, TARGET_WINNER]
+# The position model is fit on positions *gained or lost* relative to the
+# starting grid, not on the finishing position itself. Predicting absolute
+# position makes the model relearn "grid roughly equals finish" from
+# scratch -- which is precisely what the grid-order baseline already gets
+# for free -- so its capacity goes into reproducing the baseline instead of
+# improving on it. Predicting the delta builds the baseline in by
+# construction and leaves the model only the part it can actually add.
+# Predictions are converted back to absolute positions before use.
+TARGET_POSITION_DELTA: Final[str] = "position_delta"
+
+TARGET_COLUMNS: Final[list[str]] = [
+    TARGET_PODIUM,
+    TARGET_POSITION,
+    TARGET_POSITION_DELTA,
+    TARGET_WINNER,
+]
 
 # ---------------------------------------------------------------------------
 # Benchmark metrics to reproduce (spec Section 1) — used by train.py /

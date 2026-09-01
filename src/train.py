@@ -237,12 +237,27 @@ def _winner_metrics(y_true: np.ndarray, y_prob: np.ndarray, test_df: pd.DataFram
     }
 
 
-def _predict_proba(model, X: pd.DataFrame) -> np.ndarray:
+def _predict_proba(model, X: pd.DataFrame, test_df: pd.DataFrame) -> np.ndarray:
     return model.predict_proba(X)[:, 1]
 
 
-def _predict_raw(model, X: pd.DataFrame) -> np.ndarray:
+def _predict_raw(model, X: pd.DataFrame, test_df: pd.DataFrame) -> np.ndarray:
     return model.predict(X)
+
+
+def _predict_position_absolute(model, X: pd.DataFrame, test_df: pd.DataFrame) -> np.ndarray:
+    return predict_position(model, X, test_df["grid"])
+
+
+def predict_position(model, X: pd.DataFrame, grid: pd.Series | np.ndarray) -> np.ndarray:
+    """Absolute finishing position from the position model.
+
+    The model is fit on `config.TARGET_POSITION_DELTA` (finish minus grid),
+    so its output must have the grid added back before it means anything.
+    Every consumer -- CV, prediction, backtest -- must go through here, or
+    it will silently interpret "gained 2 places" as "finished 2nd".
+    """
+    return np.asarray(grid, dtype=float) + model.predict(X)
 
 
 def cross_validate(
@@ -253,6 +268,7 @@ def cross_validate(
     model_factory,
     metric_fn,
     predict_fn=_predict_proba,
+    metric_target: str | None = None,
     splitter=season_forward_splits,
     strategy: str = "season-forward (time-respecting)",
 ) -> CVReport:
@@ -269,6 +285,9 @@ def cross_validate(
     """
     report = CVReport(model_name=model_name, strategy=strategy)
     y_all = table[target].to_numpy()
+    # The position model fits the grid-relative delta but is scored on the
+    # absolute position, so metrics stay comparable across model versions.
+    y_metric = table[metric_target].to_numpy() if metric_target else y_all
 
     for label, train_idx, test_idx in splitter(table):
         test_df = table.iloc[test_idx]
@@ -277,7 +296,7 @@ def cross_validate(
 
         model = model_factory()
         model.fit(X_train, y_all[train_idx])
-        y_pred = predict_fn(model, X_test)
+        y_pred = predict_fn(model, X_test, test_df)
 
         report.folds.append(
             FoldResult(
@@ -286,7 +305,7 @@ def cross_validate(
                 n_test=len(test_idx),
                 # test_df is passed so per-race metrics (e.g. winner top-1
                 # accuracy) can group by race; simple metrics ignore it.
-                metrics=metric_fn(y_all[test_idx], y_pred, test_df),
+                metrics=metric_fn(y_metric[test_idx], y_pred, test_df),
             )
         )
 
@@ -309,10 +328,11 @@ def cross_validate_position(table: pd.DataFrame, **kwargs) -> CVReport:
     return cross_validate(
         table,
         model_name="position",
-        target=config.TARGET_POSITION,
+        target=config.TARGET_POSITION_DELTA,
         model_factory=build_position_model,
         metric_fn=_position_metrics,
-        predict_fn=_predict_raw,
+        predict_fn=_predict_position_absolute,
+        metric_target=config.TARGET_POSITION,
         **kwargs,
     )
 
@@ -342,8 +362,12 @@ def train_podium_model(table: pd.DataFrame) -> tuple[XGBClassifier, dict[str, li
 
 
 def train_position_model(table: pd.DataFrame) -> tuple[XGBRegressor, dict[str, list]]:
-    """Fit the final position model on the full table. Returns `(model, categories)`."""
-    return _fit_full(table, config.TARGET_POSITION, build_position_model)
+    """Fit the final position model. Returns `(model, categories)`.
+
+    Fit on the grid-relative delta -- use `predict_position` to turn its
+    output back into an absolute finishing position.
+    """
+    return _fit_full(table, config.TARGET_POSITION_DELTA, build_position_model)
 
 
 def train_winner_model(table: pd.DataFrame) -> tuple[XGBClassifier, dict[str, list]]:

@@ -458,9 +458,9 @@ def test_debut_nulls_are_limited_to_form_and_dnf_columns():
         "driver_dnf_rate",
         "constructor_dnf_rate",
         "quali_position",
-        "q1_time_s",
-        "q2_time_s",
-        "q3_time_s",
+        "q1_gap_s",
+        "q2_gap_s",
+        "q3_gap_s",
     }
     for col in table.columns:
         if col in allowed_null_on_debut:

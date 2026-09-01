@@ -27,11 +27,17 @@ class FakeClassifier:
 
 
 class FakeRegressor:
-    def __init__(self, predictions: list[float]):
-        self._predictions = np.array(predictions, dtype=float)
+    """Returns fixed *grid-relative deltas*, matching the real position model.
+
+    The position model is fit on `TARGET_POSITION_DELTA`, so predict.py adds
+    the grid back. These fakes emit deltas so the tests exercise that.
+    """
+
+    def __init__(self, deltas: list[float]):
+        self._deltas = np.array(deltas, dtype=float)
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
-        return self._predictions[: len(X)]
+        return self._deltas[: len(X)]
 
 
 def make_table(n: int = 4, season: int = 2030, round_number: int = 1) -> pd.DataFrame:
@@ -48,9 +54,9 @@ def make_table(n: int = 4, season: int = 2030, round_number: int = 1) -> pd.Data
                 "constructor_id": f"team_{i % 2}",
                 "grid": float(i + 1),
                 "quali_position": float(i + 1),
-                "q1_time_s": 90.0 + i,
-                "q2_time_s": None,
-                "q3_time_s": None,
+                "q1_gap_s": float(i) * 0.3,
+                "q2_gap_s": None,
+                "q3_gap_s": None,
                 "driver_rolling_avg_finish": float(i + 1),
                 "constructor_rolling_avg_finish": float(i + 1),
                 "driver_points_before_race": float(20 - i),
@@ -61,6 +67,7 @@ def make_table(n: int = 4, season: int = 2030, round_number: int = 1) -> pd.Data
                 "driver_dnf_rate": 0.1,
                 "constructor_dnf_rate": 0.1,
                 config.TARGET_POSITION: float(i + 1),
+                config.TARGET_POSITION_DELTA: 0.0,
                 config.TARGET_PODIUM: float(i < 3),
                 config.TARGET_WINNER: float(i == 0),
             }
@@ -177,11 +184,29 @@ def test_podium_probability_comes_from_the_podium_model():
 
 
 def test_predicted_position_comes_from_the_position_model():
-    models = make_models(position=[7.5, 1.5, 3.5, 9.5])
+    # Grid is 1,2,3,4; deltas below therefore give 4.5, 3.5, 6.5, 13.5.
+    models = make_models(position=[3.5, 1.5, 3.5, 9.5])
     result = predict.predict_round(2030, 1, models=models, table=make_table())
     by_driver = result.set_index("driver_id")["pred_position"]
-    assert by_driver["driver_0"] == pytest.approx(7.5)
-    assert by_driver["driver_1"] == pytest.approx(1.5)
+    assert by_driver["driver_0"] == pytest.approx(1.0 + 3.5)
+    assert by_driver["driver_1"] == pytest.approx(2.0 + 1.5)
+
+
+def test_predicted_position_adds_the_grid_back():
+    """The model outputs places gained/lost; forgetting to add grid would
+    silently read 'gained 2 places' as 'finished 2nd'."""
+    models = make_models(position=[0.0, 0.0, 0.0, 0.0])
+    result = predict.predict_round(2030, 1, models=models, table=make_table())
+    by_driver = result.set_index("driver_id")
+    # A zero delta means "finishes exactly where it started".
+    assert (by_driver["pred_position"] == by_driver["grid"]).all()
+
+
+def test_negative_delta_means_places_gained():
+    models = make_models(position=[-3.0, 0.0, 0.0, 0.0])
+    result = predict.predict_round(2030, 1, models=models, table=make_table())
+    by_driver = result.set_index("driver_id")["pred_position"]
+    assert by_driver["driver_0"] == pytest.approx(1.0 - 3.0), "P1 gaining 3 places"
 
 
 def test_each_model_uses_its_own_saved_categories():
@@ -202,7 +227,8 @@ def test_each_model_uses_its_own_saved_categories():
 
 
 def test_finishing_order_ranks_by_predicted_position():
-    models = make_models(position=[4.0, 1.0, 3.0, 2.0])
+    # grid 1,2,3,4 + deltas 3,-1,0,-2 -> 4.0, 1.0, 3.0, 2.0
+    models = make_models(position=[3.0, -1.0, 0.0, -2.0])
     result = predict.predict_round(2030, 1, models=models, table=make_table())
     ordered = predict.predicted_finishing_order(result)
     assert ordered["driver_id"].tolist() == ["driver_1", "driver_3", "driver_2", "driver_0"]
@@ -216,7 +242,8 @@ def test_finishing_order_respects_top_n():
 
 def test_finishing_order_handles_unconstrained_regressor_output():
     """Raw predictions can fall outside 1..N; ranking must still work."""
-    models = make_models(position=[0.4, 21.7, -1.2, 8.0])
+    # grid 1,2,3,4 + deltas -> -0.6, 19.7, -4.2, 4.0
+    models = make_models(position=[-1.6, 17.7, -7.2, 0.0])
     result = predict.predict_round(2030, 1, models=models, table=make_table())
     ordered = predict.predicted_finishing_order(result)
     assert ordered["predicted_rank"].tolist() == [1, 2, 3, 4]

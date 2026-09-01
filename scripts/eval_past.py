@@ -143,11 +143,11 @@ def walk_forward_predictions(
         X_test, _ = features.build_model_matrix(test_df, categories=categories)
 
         podium_model = train.build_podium_model().fit(X_train, train_df[config.TARGET_PODIUM])
-        position_model = train.build_position_model().fit(X_train, train_df[config.TARGET_POSITION])
+        position_model = train.build_position_model().fit(X_train, train_df[config.TARGET_POSITION_DELTA])
         winner_model = train.build_winner_model().fit(X_train, train_df[config.TARGET_WINNER])
 
         test_df["prob_podium"] = podium_model.predict_proba(X_test)[:, 1]
-        test_df["pred_position"] = position_model.predict(X_test)
+        test_df["pred_position"] = train.predict_position(position_model, X_test, test_df["grid"])
         test_df["prob_win"] = train.normalize_win_probabilities(
             test_df, winner_model.predict_proba(X_test)[:, 1]
         )

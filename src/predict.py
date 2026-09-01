@@ -149,7 +149,7 @@ def predict_round(
         return X
 
     prob_podium = models.podium["model"].predict_proba(_matrix(models.podium))[:, 1]
-    pred_position = models.position["model"].predict(_matrix(models.position))
+    pred_position = train.predict_position(models.position["model"], _matrix(models.position), round_rows["grid"])
     raw_win = models.winner["model"].predict_proba(_matrix(models.winner))[:, 1]
 
     result = round_rows[["driver_id", "driver_abbreviation", "constructor_id", "grid"]].copy()

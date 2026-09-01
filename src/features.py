@@ -224,6 +224,34 @@ def _normalize_pit_lane_starts(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _add_quali_gap_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert raw qualifying lap times into gap-to-fastest, in seconds.
+
+    A raw lap time is close to unusable as a feature. Measured over
+    2018-2025, mean Q3 time varies by 42.6s across circuits (Monaco ~71s,
+    Spa ~109s) while the signal that matters -- driver-to-driver spread
+    within one session -- has a median of 1.43s. So the raw column is
+    dominated roughly 30:1 by "which circuit is this".
+
+    Regulation eras add a second axis of the same problem: the fastest Q3
+    at Silverstone moves 16.7s between seasons in this dataset, more than
+    ten times the within-session spread. 2026's rule change shifts pace
+    again.
+
+    Subtracting the fastest lap of that session removes both at once and
+    leaves a directly comparable quantity: how many seconds off the pace
+    this car was. NaN is preserved -- a driver who set no time in a
+    session (knocked out earlier, or no lap) still has no time.
+    """
+    for session in ("q1", "q2", "q3"):
+        raw = f"{session}_time_s"
+        if raw not in df.columns:
+            continue
+        fastest = df.groupby(["season", "round"])[raw].transform("min")
+        df[f"{session}_gap_s"] = df[raw] - fastest
+    return df
+
+
 def _add_targets(df: pd.DataFrame) -> pd.DataFrame:
     finish = df["finish_position"]
     df[config.TARGET_POSITION] = finish
@@ -233,6 +261,9 @@ def _add_targets(df: pd.DataFrame) -> pd.DataFrame:
     # would quietly corrupt training if such rows were ever included.
     df[config.TARGET_PODIUM] = (finish <= 3).astype("float").where(finish.notna())
     df[config.TARGET_WINNER] = (finish == 1).astype("float").where(finish.notna())
+    # Positions gained (negative) or lost (positive) relative to the grid.
+    # See config.TARGET_POSITION_DELTA for why the position model uses this.
+    df[config.TARGET_POSITION_DELTA] = finish - df["grid"]
     return df
 
 
@@ -279,6 +310,7 @@ def build_feature_table(raw: pd.DataFrame | None = None, require_target: bool = 
     df = df.rename(columns={"circuit": "circuit_id"})
 
     df = _normalize_pit_lane_starts(df)
+    df = _add_quali_gap_features(df)
     df = _add_rolling_form_features(df)
     df = _add_dnf_rate_features(df)
     df = _add_standings_features(df)
